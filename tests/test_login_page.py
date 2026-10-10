@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -387,13 +388,42 @@ def test_stdio_keeps_its_own_message(failing_login):
     assert "token expired" in message and "/login" not in message
 
 
-def test_session_rejected_mid_call(server, monkeypatch):
-    class Expired:
-        def get_sleep_data(self, cdate):
-            raise GarminConnectAuthenticationError("401")
+class ExpiredSession:
+    """A cached Garmin session that Garmin has since rejected: every request
+    fails the way garminconnect reports a 401 it couldn't refresh past.
+    get_user_summary answers for FIRST_DAY so the per-day groups' parallel
+    workers are the ones to hit the rejection.
+    """
 
-    monkeypatch.setattr(mcp_server, "_api", Expired())
-    message = tool_error(server, "get_garmin_day", {"date": "d", "metrics": ["sleep_data", "hrv_data"]})
+    FIRST_DAY = "2026-10-03"
+
+    def _rejected(self, *args, **kwargs):
+        raise GarminConnectAuthenticationError("401 Unauthorized")
+
+    get_sleep_data = get_hrv_data = get_activities_by_date = connectapi = _rejected
+
+    def get_user_summary(self, cdate):
+        if cdate == self.FIRST_DAY:
+            return {"restingHeartRate": 46}
+        self._rejected()
+
+
+@pytest.mark.parametrize(
+    "tool, args",
+    [
+        ("get_garmin_day", {"date": "2026-10-05", "metrics": ["sleep_data", "hrv_data"]}),
+        ("call_garmin_endpoint", {"endpoint": "get_sleep_data", "args": {"cdate": "2026-10-05"}}),
+        # A range endpoint (one request for the range)...
+        ("get_garmin_summary", {"date": "2026-10-05", "metrics": ["weight", "hrv"]}),
+        # ...and the per-day groups, whose later days run in worker threads.
+        ("get_garmin_summary", {"from_date": "2026-10-03", "to_date": "2026-10-06",
+                                "metrics": ["heart"]}),
+    ],
+)
+def test_session_rejected_mid_call(server, monkeypatch, tool, args):
+    monkeypatch.setattr(mcp_server, "_api", ExpiredSession())
+    message = tool_error(server, tool, args)
+    assert "Garmin session expired" in message
     assert f"open {PUBLIC}/login" in message
     assert mcp_server._api is None  # the dead session is dropped
 
@@ -700,3 +730,89 @@ def test_completing_an_expired_request_is_refused(client, provider, monkeypatch)
     with pytest.raises(KeyError):
         provider.complete_authorization(req, "owner")
     assert provider.expired(req) is not None  # still there for the way back
+
+
+# --- the whole logout and re-login flow ------------------------------------------------
+
+
+def mcp_tool_call(client, token, name, arguments):
+    """A tools/call over HTTP, authorized like Claude's: (is_error, text)."""
+    r = client.post(
+        "/mcp",
+        content=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": name, "arguments": arguments}}),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "Accept": "application/json, text/event-stream"},
+    )
+    assert r.status_code == 200, r.text
+    result = r.json()["result"]
+    return result.get("isError", False), result["content"][0]["text"]
+
+
+def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
+    """Connected client; Garmin then logs the owner out; the tool says where
+    to sign in; the owner signs in at that link; the same client, with the
+    same token, works again. Garmin itself is faked: its tokens are valid
+    while their generation matches Garmin's current one.
+    """
+    garmin_side = {"generation": 1}
+    token_file = state / "garmin_tokens" / "saved.json"
+
+    def save(session, token_store):  # what /login stores after a sign-in
+        token_store.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(json.dumps({"generation": garmin_side["generation"]}))
+
+    garmin.save = save
+
+    class Session:
+        def __init__(self, generation):
+            self.generation = generation
+
+        def get_sleep_data(self, cdate):
+            if self.generation != garmin_side["generation"]:
+                raise GarminConnectAuthenticationError("401 Unauthorized")
+            return {"dailySleepDTO": {"calendarDate": cdate, "sleepTimeSeconds": 25000}}
+
+    def login(**_):  # what the server does to load the stored tokens
+        if not token_file.exists():
+            raise GarminConnectAuthenticationError("no tokens")
+        session = Session(json.loads(token_file.read_text())["generation"])
+        session.get_sleep_data("check")  # garminconnect checks the tokens on load
+        return session
+
+    monkeypatch.setattr(mcp_server, "login", login)
+    monkeypatch.setattr(mcp_server, "_api", None)
+    ask = {"date": "2026-10-05", "metrics": ["sleep_data"]}
+
+    # 1. Connect Claude: authorize, sign in to Garmin, exchange the code.
+    client_id, req = start_authorization(client)
+    back = sign_in(client, req).headers["location"]
+    tokens = client.post("/token", data={
+        "grant_type": "authorization_code", "code": query(back)["code"],
+        "redirect_uri": REDIRECT, "client_id": client_id,
+        "code_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    }).json()
+    is_error, text = mcp_tool_call(client, tokens["access_token"], "get_garmin_day", ask)
+    assert not is_error and json.loads(text)["sleep_data"]["dailySleepDTO"]["sleepTimeSeconds"]
+
+    # 2. Garmin logs the owner out (password change, security reset, ...).
+    garmin_side["generation"] += 1
+
+    # 3. The next call explains what to do, with the link.
+    is_error, text = mcp_tool_call(client, tokens["access_token"], "get_garmin_day", ask)
+    assert is_error and "Garmin session expired" in text
+    link = re.search(r"open (\S+/login)", text).group(1)
+    assert link == f"{PUBLIC}/login"
+    # Asking again before signing in fails the same way (no silent recovery).
+    is_error, _ = mcp_tool_call(client, tokens["access_token"], "get_garmin_day", ask)
+    assert is_error
+
+    # 4. The owner opens the link and signs in to Garmin again.
+    r = client.get(urlsplit(link).path)
+    assert "refresh kcal's Garmin session" in r.text
+    r = sign_in(client)
+    assert "Garmin session refreshed" in r.text
+
+    # 5. Asking again works, with the same client token: no reconnecting.
+    is_error, text = mcp_tool_call(client, tokens["access_token"], "get_garmin_day", ask)
+    assert not is_error and json.loads(text)["sleep_data"]["dailySleepDTO"]["calendarDate"] == "2026-10-05"
