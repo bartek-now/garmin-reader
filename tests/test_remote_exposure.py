@@ -30,6 +30,9 @@ LOCATED = {
     "geoPolylineDTO": {"polyline": [[52.1, 21.0]]},
     "hasPolyline": True,
     "ownerFullName": "Jane Doe",
+    "activityName": "Poznan Running",
+    "description": "Easy loop round the lake",
+    "courseName": "Lake loop",
     "ownerDisplayName": "jdoe",
     "ownerProfileImageUrlLarge": "https://img.example/1.png",
     "userInfoDto": {"fullname": "Jane Doe", "displayname": "jdoe"},
@@ -40,7 +43,7 @@ KEPT = {
     "averageOxygenSaturation": 97,  # avera-GEO-xygen
     "timeAllocation": 5,  # al-LOCATION
     "userProfilePK": 123,
-    "activityName": "Morning Run",
+    "name": "Late Meals",  # lifestyle log entries must survive
     "imageURL": "https://img.example/device.png",
     "geography_score": 1,
 }

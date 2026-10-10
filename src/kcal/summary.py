@@ -87,9 +87,9 @@ GROUP_DOCS = {
     "are omitted. 1 request/day.",
     "weight": "weight_kg, body_fat_pct, muscle_mass_kg from the day's last "
     "weigh-in; weigh_ins when there were several. 1 request/range.",
-    "workouts": "workouts: list of {id, name, type, start (HH:MM), minutes, "
-    "calories (gross), active_calories (net of BMR), steps}; id works with "
-    "get_activity. 1 request/range.",
+    "workouts": "workouts: list of {id, start (HH:MM), minutes, calories (gross), "
+    "active_calories (net of BMR), steps}, numbers only (no names, which can "
+    "contain places); id works with get_activity. 1 request/range.",
     "hrv": "hrv_last_night_ms (overnight average), hrv_last_night_5min_high_ms, "
     "hrv_weekly_avg_ms, hrv_baseline_low_ms/_high_ms (Garmin's balanced range), "
     "hrv_status. 1 request/range.",
@@ -252,10 +252,10 @@ def _table(rows: dict[str, dict], groups: list[str]) -> dict:
 
 def _workout(raw: dict) -> dict:
     w = Workout.from_raw(raw)
+    # Numbers only: Garmin names activities after the place ("Poznan
+    # Running"), so names and types are left out.
     out = dict(
         id=w.activity_id,
-        name=w.name,
-        type=w.activity_type,
         start=(w.start_time or "")[11:16] or None,
         minutes=round(w.duration_seconds / 60),
         calories=round(w.calories),

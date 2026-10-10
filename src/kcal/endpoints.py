@@ -71,16 +71,19 @@ REMOTE_ALLOWED = frozenset({
 
 # Results sent over HTTP drop every key whose name contains one of these
 # words: coordinates, GPS tracks and place names reveal where the owner lives
-# and trains; names, profile photos and e-mail identify them. Keys are split
+# and trains; names, profile photos and e-mail identify them; activity and
+# course names (Garmin names activities after the place, e.g. "Poznan
+# Running") and free-text descriptions can contain either. Keys are split
 # into words (camelCase or snake_case) and compared whole, so e.g.
 # `averageOxygen` doesn't match `geo`.
 PRIVATE_KEY_WORDS = frozenset({
     "latitude", "longitude", "polyline", "geo", "location",
-    "owner", "fullname", "displayname", "email",
+    "owner", "fullname", "displayname", "email", "description",
 })
 # ...or one of these consecutive word pairs.
 PRIVATE_KEY_PHRASES = frozenset({
     ("full", "name"), ("display", "name"), ("profile", "image"), ("user", "info"),
+    ("activity", "name"), ("course", "name"),
 })
 
 
