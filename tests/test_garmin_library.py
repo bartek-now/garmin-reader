@@ -6,8 +6,18 @@ is down or limiting requests" by the exception garminconnect raises. These
 tests pin that down for the installed version: if an upgrade changes it,
 they fail instead of the owner getting the wrong instructions.
 
-They replace two private parts of garminconnect's client (its API session
-and its token-refresh POST); a rename there makes them fail loudly too.
+They replace private parts of garminconnect's client: its API session, its
+token-refresh POST and its token fields. If a garminconnect upgrade renames
+any of them, the tests must fail, not pass for the wrong reason or reach
+Garmin. Three layers make sure of that:
+
+1. stub() refuses to replace an attribute the real client doesn't have, so
+   a rename fails before any request is attempted;
+2. the network is blocked for requests and curl_cffi (which garminconnect
+   uses for token refresh and login), and every proxy variable points at a
+   closed local port, so any other HTTP client can't reach Garmin either;
+3. every test checks the fake Garmin saw the requests it expects, so a
+   result produced some other way doesn't count.
 """
 
 import asyncio
@@ -54,18 +64,51 @@ class FakeGarminApi:
         return response(status, body, url)
 
 
-@pytest.fixture
-def garmin(monkeypatch):
-    """A real Garmin client holding tokens, with no way onto the network."""
-    def no_network(*args, **kwargs):
-        raise AssertionError("tried to reach the network")
+def stub(obj, name: str, value) -> None:
+    """Replace obj.name, which must already exist: if garminconnect renamed
+    it, setting it would only add an attribute the library never reads.
+    """
+    assert hasattr(obj, name), (
+        f"garminconnect's {type(obj).__name__} has no {name!r} any more; "
+        "re-check how it makes requests and update these tests"
+    )
+    setattr(obj, name, value)
 
+
+def no_network(*args, **kwargs):
+    raise AssertionError("tried to reach the network")
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    """No test here may reach Garmin, whatever garminconnect uses."""
     monkeypatch.setattr(requests.Session, "request", no_network)
+    try:
+        import curl_cffi.requests as cffi
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setattr(cffi.Session, "request", no_network)
+        for name in ("request", "get", "post"):
+            monkeypatch.setattr(cffi, name, no_network)
+    # Anything else that honours proxy settings goes to a closed port.
+    for var in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(var, "http://127.0.0.1:9")
+        monkeypatch.setenv(var.lower(), "http://127.0.0.1:9")
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture
+def garmin():
+    """A real Garmin client holding (fake) tokens."""
     api = Garmin(retry_attempts=0)
     api.display_name = "owner"
     client = api.client
-    client.di_token, client.di_refresh_token, client.di_client_id = "old-access", "refresh", "cid"
-    client._tokenstore_path = None  # don't write tokens anywhere
+    stub(client, "di_token", "old-access")
+    stub(client, "di_refresh_token", "refresh")
+    stub(client, "di_client_id", "cid")
+    stub(client, "_tokenstore_path", None)  # don't write tokens anywhere
     return api
 
 
@@ -79,14 +122,14 @@ def refresh_answers(api, status: int, new_token: str = "new-access"):
         r.__dict__["text"] = "invalid_grant" if status != 200 else ""
         return r
 
-    api.client._http_post = post
+    stub(api.client, "_http_post", post)
     return attempts
 
 
 def test_renewal_that_works_is_used(garmin):
     # Positive control: the stubs really drive garminconnect's own renewal.
     session = FakeGarminApi({"new-access": 200})
-    garmin.client._api_session = session
+    stub(garmin.client, "_api_session", session)
     attempts = refresh_answers(garmin, 200)
     assert garmin.get_sleep_data("2026-10-05")["dailySleepDTO"]["sleepTimeSeconds"] == 25000
     assert attempts == ["refresh"]
@@ -97,7 +140,7 @@ def test_renewal_that_works_is_used(garmin):
 def test_logged_out_is_an_authentication_error(garmin):
     # Garmin rejects the token and the refresh token: logged out.
     session = FakeGarminApi({})
-    garmin.client._api_session = session
+    stub(garmin.client, "_api_session", session)
     attempts = refresh_answers(garmin, 400)
     with pytest.raises(GarminConnectAuthenticationError):
         garmin.get_sleep_data("2026-10-05")
@@ -106,7 +149,7 @@ def test_logged_out_is_an_authentication_error(garmin):
 
 
 def test_rate_limiting_is_not_an_authentication_error(garmin):
-    garmin.client._api_session = FakeGarminApi({"old-access": 429})
+    stub(garmin.client, "_api_session", FakeGarminApi({"old-access": 429}))
     refresh_answers(garmin, 200)
     with pytest.raises(GarminConnectTooManyRequestsError):
         garmin.get_sleep_data("2026-10-05")
@@ -117,7 +160,7 @@ def test_refresh_lock_still_wraps_the_real_client(garmin):
     _serialize_token_refresh(garmin.client)
     assert garmin.client._refresh_session.kcal_serialized
     session = FakeGarminApi({"new-access": 200})
-    garmin.client._api_session = session
+    stub(garmin.client, "_api_session", session)
     refresh_answers(garmin, 200)
     garmin.get_sleep_data("2026-10-05")
     assert session.requests == ["old-access", "new-access"]
@@ -148,12 +191,15 @@ def tool_error(server, name, args) -> str:
     ],
 )
 def test_real_logout_gets_sign_in_instructions(server, garmin, monkeypatch, tool, args):
-    garmin.client._api_session = FakeGarminApi({})
-    refresh_answers(garmin, 400)
+    session = FakeGarminApi({})
+    stub(garmin.client, "_api_session", session)
+    attempts = refresh_answers(garmin, 400)
     monkeypatch.setattr(mcp_server, "_api", garmin)
     message = tool_error(server, tool, args)
     assert "Garmin session expired" in message and f"open {PUBLIC}/login" in message
     assert mcp_server._api is None
+    # Reached through Garmin's actual answers, not some other failure.
+    assert session.requests == ["old-access", "old-access"] and attempts == ["refresh"]
 
 
 @pytest.mark.parametrize(
@@ -167,7 +213,7 @@ def test_real_logout_gets_sign_in_instructions(server, garmin, monkeypatch, tool
 )
 def test_real_rate_limit_gets_try_again_later(server, garmin, monkeypatch, tool, args):
     session = FakeGarminApi({"old-access": 429})
-    garmin.client._api_session = session
+    stub(garmin.client, "_api_session", session)
     monkeypatch.setattr(mcp_server, "_api", garmin)
     message = tool_error(server, tool, args)
     assert "try again in a few minutes" in message and "/login" not in message
