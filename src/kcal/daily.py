@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 
 from kcal.auth import login
 from kcal.client import fetch_activities, fetch_day_summary, fetch_weigh_ins
-from kcal.dedupe import build_day_stats, build_weight_row
+from kcal.dedupe import build_day_stats
 from kcal.models import DayStats
 
 
@@ -81,13 +81,3 @@ def fetch_days(days: list[date], login_fn=login) -> list[DayStats]:
         )
     return results
 
-
-def fetch_weights(days: list[date], login_fn=login) -> list[dict]:
-    """One row per day with a weigh-in in consecutive `days`, oldest first,
-    from a single request for the whole range.
-    """
-    if not days:
-        return []
-    weigh_ins = fetch_weigh_ins(login_fn(), days[0], days[-1])
-    rows = (build_weight_row(d, weigh_ins[d]) for d in sorted(weigh_ins))
-    return [r for r in rows if r is not None]

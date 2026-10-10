@@ -187,7 +187,7 @@ rules, and stdio tools unlock everything explicitly.
   `race_predictions`, `fitnessage_data`, `lactate_threshold`, `cycling_ftp`,
   `running_tolerance`, `personal_record`, `progress_summary_between_dates`
 - Activities (completed sessions; the source of workout calories in
-  `get_garmin_daily_stats`): `activities`, `activities_by_date`,
+  `get_garmin_summary`): `activities`, `activities_by_date`,
   `activities_fordate`, `activity`, `last_activity`, `activity_splits`,
   `activity_split_summaries`, `activity_typed_splits`,
   `activity_exercise_sets`, `activity_hr_in_timezones`,
@@ -218,6 +218,14 @@ kept. Elevation and time zone are left in: they're coarse.
 
 The allowlist lives in `endpoints.py` as one explicit set, so new
 `garminconnect` getters are blocked remotely until added on purpose.
+
+Besides getters, `get_garmin_summary` uses three Garmin range endpoints that
+`garminconnect` doesn't wrap (HRV, sleep statistics and training readiness
+for a date range). Remotely, raw requests are allowed only for those, with
+the whole path matched (`summary.RANGE_PATHS`: the endpoint followed by two
+dates), so nothing else is reachable that way. `get_garmin_day`'s `metrics`
+schema lists only the allowlisted single-day endpoints, so other names are
+refused before any code runs.
 
 **Tests**, positive and negative:
 

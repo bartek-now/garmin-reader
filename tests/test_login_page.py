@@ -368,7 +368,7 @@ def tool_error(server, name, args):
     "tool, args",
     [
         ("get_garmin_day", {"date": "2026-10-05"}),
-        ("get_garmin_weight", {"date": "2026-10-05"}),
+        ("get_garmin_summary", {"date": "2026-10-05", "metrics": ["weight"]}),
         ("call_garmin_endpoint", {"endpoint": "get_sleep_data", "args": {"cdate": "d"}}),
     ],
 )

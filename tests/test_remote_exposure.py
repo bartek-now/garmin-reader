@@ -121,14 +121,20 @@ def test_list_endpoints_remotely_only_allowlisted(api, remote):
 
 @pytest.mark.parametrize("name", DISALLOWED)
 def test_day_rejects_disallowed_metric_remotely(api, remote, name):
-    out = call(remote, "get_garmin_day", {"date": "2026-10-05", "metrics": [name, "sleep_data"]})
-    if endpoints.is_private_key(name):
-        # e.g. full_name: its error entry is stripped like any private key.
-        assert name not in out
-    else:
-        assert "not available remotely" in out[name]["error"].lower()
-        assert name not in out[name]["error"].split("Available:")[1]
-    assert api.calls == ["get_sleep_data"]  # the allowed one still works
+    # The schema's enum only lists allowed metrics, so the call is refused
+    # before any code runs.
+    with pytest.raises(ToolError, match="Input should be"):
+        call(remote, "get_garmin_day", {"date": "2026-10-05", "metrics": [name, "sleep_data"]})
+    assert api.calls == []
+
+
+@pytest.mark.parametrize("name", DISALLOWED)
+def test_day_metrics_guard_disallowed_metric_too(api, name):
+    # Underneath the schema, day_metrics refuses them as well.
+    out = endpoints.day_metrics(api, "2026-10-05", [name, "sleep_data"], endpoints.REMOTE_ALLOWED)
+    assert "not available remotely" in out[name]["error"].lower()
+    assert name not in out[name]["error"].split("Available:")[1]
+    assert api.calls == ["get_sleep_data"]
 
 
 def test_no_allowlisted_name_is_a_private_key():
@@ -223,8 +229,8 @@ def test_garmin_stand_in_allows_allowlisted_by_default(api):
 @pytest.mark.parametrize(
     "tool, args",
     [
-        ("get_garmin_weight", {"date": "2026-10-05"}),
-        ("get_garmin_daily_stats", {"date": "2026-10-05"}),
+        ("get_garmin_summary", {"date": "2026-10-05", "metrics": ["weight"]}),
+        ("get_garmin_summary", {"date": "2026-10-05", "metrics": ["activity"]}),
     ],
 )
 def test_curated_tools_go_through_the_stand_in(api, remote, monkeypatch, tool, args):
@@ -232,9 +238,11 @@ def test_curated_tools_go_through_the_stand_in(api, remote, monkeypatch, tool, a
     monkeypatch.setattr(endpoints, "REMOTE_ALLOWED", frozenset())
     monkeypatch.setattr(mcp_server, "REMOTE", mcp_server._Exposure(frozenset(), endpoints.strip_private))
     blocked = mcp_server.build_server(HttpSettings(public_url="https://x.example"))
-    with pytest.raises(ToolError, match="not available remotely"):
-        call(blocked, tool, args)
-    assert api.calls == []
+    out = call(blocked, tool, args)
+    # Reported as that group's error; Garmin is never asked.
+    group = args["metrics"][0]
+    assert "not available remotely" in out["errors"][group]
+    assert out["days"] == [] and api.calls == []
 
 
 # --- Garmin login failures ------------------------------------------------------
@@ -265,3 +273,61 @@ def test_call_endpoint_reports_login_failure(failing_login, remote):
     with pytest.raises(ToolError, match="needs an MFA code"):
         call(remote, "call_garmin_endpoint", {"endpoint": "get_sleep_data", "args": {"cdate": "d"}})
     assert failing_login == [1]
+
+
+# --- the range endpoints get_garmin_summary uses ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/hrv-service/hrv/daily/2026-10-01/2026-10-08",
+        "/sleep-service/stats/sleep/daily/2026-10-01/2026-10-08",
+        "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08",
+    ],
+)
+def test_range_endpoints_reachable_remotely(api, path):
+    mcp_server._Garmin().connectapi(path)  # default exposure is the remote one
+    assert api.calls == ["connectapi"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/userprofile-service/socialProfile",
+        "/activity-service/activity/1/details",
+        "/hrv-service/hrv/daily/2026-10-01/2026-10-08/../../../userprofile-service/socialProfile",
+        "/hrv-service/hrv/daily/2026-10-01/2026-10-08?x=1",
+    ],
+)
+def test_other_raw_paths_blocked_remotely(api, path):
+    with pytest.raises(ValueError, match="not available remotely"):
+        mcp_server._Garmin().connectapi(path)
+    assert api.calls == []
+
+
+def test_raw_path_extra_arguments_blocked_remotely(api):
+    with pytest.raises(ValueError, match="not available remotely"):
+        mcp_server._Garmin().connectapi("/hrv-service/hrv/daily/2026-10-01/2026-10-08", method="POST")
+
+
+def test_summary_works_remotely_and_strips_nothing_it_needs(api, remote, monkeypatch):
+    def connectapi(path):
+        api.calls.append("connectapi")
+        return {"hrvSummaries": [{"calendarDate": "2026-10-05", "lastNightAvg": 41}]}
+
+    monkeypatch.setattr(api, "connectapi", connectapi, raising=False)
+    out = call(remote, "get_garmin_summary", {"date": "2026-10-05", "metrics": ["hrv"]})
+    assert out == {"fields": ["date", "hrv_last_night_ms"], "days": [["2026-10-05", 41]]}
+
+
+def test_remote_day_enum_lists_only_allowlisted_metrics(remote, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(mcp_server, "REMOTE", mcp_server._Exposure(
+        frozenset({"sleep_data", "hrv_data"}), endpoints.strip_private))
+    server = mcp_server.build_server(HttpSettings(public_url="https://x.example"))
+    day = next(t for t in asyncio.run(server.list_tools()) if t.name == "get_garmin_day")
+    assert day.inputSchema["properties"]["metrics"]["anyOf"][0]["items"]["enum"] == [
+        "hrv_data", "sleep_data",
+    ]
+    assert "- sleep_data:" in day.description and "- stress_data:" not in day.description

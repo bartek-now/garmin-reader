@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from kcal.daily import fetch_days, fetch_weights, resolve_days
+from kcal.daily import fetch_days, resolve_days
 
 TODAY = date(2026, 7, 9)
 YESTERDAY = date(2026, 7, 8)
@@ -108,25 +108,3 @@ def test_fetch_days_batches_activities_and_weigh_ins():
 
 def test_fetch_days_empty():
     assert fetch_days([], login_fn=lambda: pytest.fail("should not log in")) == []
-
-
-def test_fetch_weights_one_request_oldest_first():
-    api = RangeApi()
-    api.get_weigh_ins = lambda startdate, enddate: (api.calls.append("weigh_ins") or {
-        "dailyWeightSummaries": [
-            {"summaryDate": "2026-07-03", "allWeightMetrics": [{"date": 3, "weight": 69500.0}]},
-            {"summaryDate": "2026-07-02", "allWeightMetrics": []},
-            {"summaryDate": "2026-07-01", "allWeightMetrics": [{"date": 1, "weight": 70000.0}]},
-        ]
-    })
-    days = resolve_days(None, "2026-07-01", "2026-07-03", today=TODAY)
-    rows = fetch_weights(days, login_fn=lambda: api)
-    assert api.calls == ["weigh_ins"]
-    assert rows == [
-        {"date": "2026-07-01", "weight_kg": 70.0},
-        {"date": "2026-07-03", "weight_kg": 69.5},
-    ]
-
-
-def test_fetch_weights_empty():
-    assert fetch_weights([], login_fn=lambda: pytest.fail("should not log in")) == []

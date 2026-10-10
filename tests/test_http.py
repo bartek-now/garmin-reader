@@ -154,7 +154,7 @@ def test_requests_stand_alone_without_initialize(client):
     r = post(client, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert r.status_code == 200
     names = {t["name"] for t in r.json()["result"]["tools"]}
-    assert "get_garmin_daily_stats" in names and len(names) == 6
+    assert "get_garmin_summary" in names and len(names) == 5
 
 
 def test_tool_call_over_http(client):

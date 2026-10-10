@@ -64,16 +64,32 @@ pytest
 
 ## MCP server
 
-`kcal-mcp` runs a stdio MCP server with six tools:
+`kcal-mcp` runs a stdio MCP server with five tools:
 
-- `get_garmin_daily_stats` (`date`, or `from_date`/`to_date`; defaults to
-  yesterday): the same fields as the CSV plus per-workout details. Ranges
-  are limited to 120 days.
-- `get_garmin_weight` (same date arguments): one compact row per day with a
-  weigh-in (`weight_kg`, plus `body_fat_pct`/`muscle_mass_kg` if the scale
-  reports them). Ranges up to 366 days, fetched in a single request.
-- `get_garmin_day` (`date`, optional `metrics`): several per-day metrics in
-  one call (sleep, HRV, resting HR, training readiness/status, ...).
+- `get_garmin_summary` (`date`, or `from_date`/`to_date`; defaults to
+  yesterday; optional `metrics`): compact numbers per day across a range, for
+  trends and for comparing metrics (e.g. HRV against sleep, training load or
+  logged behaviours). `metrics` picks groups:
+  - `activity`: steps, non-workout steps, active/resting/workout calories,
+    intensity minutes, floors (the same numbers as the CSV)
+  - `heart`: resting, 7-day resting, min and max heart rate
+  - `stress`: average and max stress, body battery
+  - `lifestyle`: behaviours logged in Garmin's lifestyle log
+  - `weight`: weight, body fat, muscle mass
+  - `workouts`: compact list of the day's workouts
+  - `hrv`: overnight HRV, weekly average, baseline range, status
+  - `sleep`: score, bedtime and wake time, stages, heart rate, breathing,
+    SpO2
+  - `readiness`: training readiness and acute training load
+
+  The default is `activity`, `weight`, `sleep` and `hrv`. The result is a
+  table (`fields` once, then one array per day), which keeps a year of HRV,
+  sleep and readiness under the size limit. Ranges go up to 366 days, or 120
+  with a per-day group (`activity`, `heart`, `stress`, `lifestyle`). Sleep,
+  HRV and readiness on date D describe the night ending that morning.
+- `get_garmin_day` (`date`, optional `metrics`): Garmin's own detail for one
+  day, from any of its single-day endpoints (sleep, HRV, heart rate, stress,
+  ...). Each metric is listed and described in the tool's schema.
 - `list_garmin_endpoints`: every read-only Garmin Connect endpoint and its
   parameters.
 - `call_garmin_endpoint` (`endpoint`, `args`): call any of those endpoints,

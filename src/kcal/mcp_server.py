@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import functools
 import hashlib
+import inspect
 import os
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import uvicorn
@@ -32,12 +33,11 @@ from garminconnect import (
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from kcal import endpoints
+from kcal import endpoints, summary
 from kcal.auth import GarminLoginError, login
-from kcal.daily import fetch_days, fetch_weights, resolve_days
+from kcal.daily import resolve_days
 from kcal.http_log import LogClientErrors
 from kcal.login_page import LoginPage
-from kcal.models import DayStats
 from kcal.oauth import KcalOAuthProvider, auth_settings
 from kcal.settings import HttpSettings, garmin_token_store, state_dir
 
@@ -60,12 +60,6 @@ REMOTE = _Exposure(allowed=endpoints.REMOTE_ALLOWED, scrub=endpoints.strip_priva
 # Fails closed: code running outside a tool wrapper gets the remote rules.
 # stdio tools unlock LOCAL explicitly in _wrap().
 _exposure: ContextVar[_Exposure] = ContextVar("kcal_exposure", default=REMOTE)
-
-# Each day costs one Garmin request (the daily summary), made sequentially, and
-# ~300 chars of output; 120 days stays well inside endpoints.MAX_RESULT_CHARS.
-MAX_STATS_DAYS = 120
-# Weigh-ins for any range are one request and ~80 chars per day.
-MAX_WEIGHT_DAYS = 366
 
 _SRC = Path(__file__).resolve().parent
 
@@ -158,11 +152,22 @@ class _Garmin:
 
     def __getattr__(self, name):
         allowed = _exposure.get().allowed
+        if allowed is not None and name == "connectapi":
+            return _range_endpoint_only
         if allowed is not None and not (
             name.startswith("get_") and name.removeprefix("get_") in allowed
         ):
             raise ValueError(f"Garmin {name!r} is not available remotely.")
         return getattr(_get_api(), name)
+
+
+def _range_endpoint_only(path: str, **kwargs):
+    """Remotely, raw requests are allowed only for the range endpoints
+    get_garmin_summary uses, matched in full.
+    """
+    if not summary.RANGE_PATHS.fullmatch(path) or kwargs:
+        raise ValueError(f"Garmin path {path!r} is not available remotely.")
+    return _get_api().connectapi(path)
 
 
 def _no_mfa() -> str:
@@ -207,54 +212,45 @@ def _wrap(fn, exposure: _Exposure):
     return wrapper
 
 
-def _day_to_dict(s: DayStats) -> dict:
-    return {
-        "date": s.date,
-        "weight_kg": s.weight_kg,
-        "steps": s.total_steps,
-        "non_workout_steps": s.non_workout_steps,
-        "active_calories": round(s.active_calories),
-        "passive_calories": round(s.bmr_calories),
-        "workout_calories": round(s.workout_calories),
-        "workout_active_calories": round(s.workout_active_calories),
-        "workouts": [asdict(w) for w in s.workouts],
-    }
-
-
 @_tool
-def get_garmin_daily_stats(
+def get_garmin_summary(
     date: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
-) -> list[dict]:
-    """Daily Garmin Connect stats: weight, steps, calories and workouts.
-
-    Dates are YYYY-MM-DD. Pass `date` for one day, or `from_date` (and
-    optionally `to_date`, default yesterday) for an inclusive range. With no
-    arguments, returns yesterday. Calories are kcal; weight is kg (null if no
-    weigh-in that day). Ranges are limited to 120 days; split longer
-    ones into several calls.
-    """
-    days = resolve_days(date, from_date, to_date, max_days=MAX_STATS_DAYS)
-    return [_day_to_dict(s) for s in fetch_days(days, _Garmin)]
+    metrics: list[summary.Group] | None = None,
+) -> dict:
+    groups = list(metrics) if metrics else list(summary.DEFAULT_GROUPS)
+    days = resolve_days(date, from_date, to_date, max_days=summary.MAX_RANGE_DAYS)
+    return summary.summarize(_Garmin(), days, groups)
 
 
-@_tool
-def get_garmin_weight(
-    date: str | None = None,
-    from_date: str | None = None,
-    to_date: str | None = None,
-) -> list[dict]:
-    """Weigh-ins from a Garmin scale: one row per day that had one, oldest first.
+get_garmin_summary.__doc__ = """One compact row per day across a date range, for the metric groups you pick.
 
-    Same date arguments as `get_garmin_daily_stats`; ranges are limited to
-    366 days and take one Garmin request regardless of length. Each row has
-    `date`, `weight_kg`, and `body_fat_pct` / `muscle_mass_kg` when the scale
-    reports them, from the day's last weigh-in; `count` appears when there
-    were several that day. Prefer this over `get_weigh_ins` for weight trends.
-    """
-    days = resolve_days(date, from_date, to_date, max_days=MAX_WEIGHT_DAYS)
-    return fetch_weights(days, _Garmin)
+Use this for trends and for comparing metrics across days (e.g. HRV against
+sleep, training load or logged behaviours). Dates are YYYY-MM-DD: `date` for
+one day, or `from_date` (and optionally `to_date`, default yesterday) for an
+inclusive range; no arguments means yesterday. `metrics` picks the groups
+(default: {default}):
+{groups}
+
+The result is a table: `fields` names the columns once, and `days` has one
+array per day (oldest first) in that order, null where Garmin reported
+nothing. Columns empty on every day, and days with no data, are left out.
+If a group can't be fetched, the others are still returned, with
+`errors` saying which group failed and why. Ranges: up to {max_range} days, or
+{max_per_day} when a per-day group (activity, heart, stress, lifestyle) is
+included; per-day groups take about a second per 4 days. A year of up to three
+range groups (e.g. hrv, sleep, readiness) fits the result size limit; with more
+groups or workouts, use shorter ranges. Sleep, HRV and readiness on date D describe the night
+ending on the morning of D, so they reflect day D-1's training, meals and
+logged behaviours. Calories are kcal. For one day's full Garmin detail use
+get_garmin_day.
+""".format(
+    default=", ".join(summary.DEFAULT_GROUPS),
+    groups=summary.describe_groups(),
+    max_range=summary.MAX_RANGE_DAYS,
+    max_per_day=summary.MAX_PER_DAY_DAYS,
+)
 
 
 @_tool
@@ -285,14 +281,16 @@ def call_garmin_endpoint(endpoint: str, args: dict | None = None) -> object:
 def get_garmin_day(date: str, metrics: list[str] | None = None) -> dict:
     """Several Garmin metrics for one day (YYYY-MM-DD) in a single call.
 
-    `metrics` are single-date endpoint names without the `get_` prefix, e.g.
-    ["sleep_data", "heart_rates", "stress_data"]. Default is a compact set:
-    sleep, HRV, resting HR, training readiness/status, max metrics, hydration
-    and intensity minutes. Intraday series (heart_rates, stress_data,
-    steps_data, ...) must be requested explicitly. Defaults have long lists
-    replaced by "<N items omitted>"; metrics you name in `metrics` are returned
-    in full, e.g. metrics=["sleep_data"] for the per-minute sleep lists. A
-    metric that fails reports its own error without failing the others.
+    Garmin's own detail for the day; for compact numbers across days use
+    get_garmin_summary. `metrics` picks endpoints (see below). Default is a
+    set of daily summaries: sleep, HRV, resting HR, training readiness and
+    status, max metrics, hydration and intensity minutes, with long lists
+    replaced by "<N items omitted>". Metrics you name in `metrics` are
+    returned in full, e.g. metrics=["sleep_data"] for the per-minute sleep
+    lists. A metric that fails reports its own error without failing the
+    others. Metrics:
+
+    {metrics}
     """
     return endpoints.day_metrics(_Garmin(), date, metrics, _exposure.get().allowed)
 
@@ -361,10 +359,33 @@ def build_server(
         server.custom_route("/login", methods=["GET", "POST"])(page.handle)
         exposure = replace(REMOTE, login_url=f"{http.public_url}/login")
     for fn in _TOOLS:
-        server.tool(structured_output=False)(_wrap(fn, exposure))
+        tool = _wrap(fn, exposure)
+        if customize := getattr(fn, "customize", None):
+            customize(tool, exposure)
+        server.tool(structured_output=False)(tool)
     return server
 
 
+def _describe_day_metrics(tool, exposure: _Exposure) -> None:
+    """Give get_garmin_day's `metrics` an enum of the endpoints this server
+    accepts (only allowlisted ones over HTTP), each described in one line.
+    The list depends on the server, so it's filled in here rather than in the
+    docstring itself.
+    """
+    names = endpoints.single_day_metrics(exposure.allowed)
+    descriptions = endpoints.describe(names)
+    tool.__doc__ = inspect.cleandoc(get_garmin_day.__doc__).format(
+        metrics="\n".join(f"- {n}: {descriptions[n]}" for n in names)
+    )
+    sig = inspect.signature(get_garmin_day, eval_str=True)
+    allowed_type = list[Literal[tuple(names)]] | None if names else None  # none: only null
+    metrics = sig.parameters["metrics"].replace(annotation=allowed_type)
+    tool.__signature__ = sig.replace(
+        parameters=[metrics if p.name == "metrics" else p for p in sig.parameters.values()]
+    )
+
+
+get_garmin_day.customize = _describe_day_metrics
 mcp = build_server()
 
 
