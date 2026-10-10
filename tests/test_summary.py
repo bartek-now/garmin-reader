@@ -148,7 +148,7 @@ def test_weight(api):
 def test_workouts_are_compact(api):
     _, rows = table(api, ["workouts"])
     assert rows[str(D2)]["workouts"] == [{
-        "id": 1, "name": "Run", "type": "running", "start": "07:30", "minutes": 30,
+        "id": 1, "start": "07:30", "minutes": 30,
         "calories": 400, "active_calories": 360, "steps": 4000,
     }]
 

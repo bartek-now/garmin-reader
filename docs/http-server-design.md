@@ -211,8 +211,9 @@ activity endpoints also carry the owner's identity (`ownerFullName`,
 `full_name` and `user_profile` is meant to keep out. In HTTP mode every result
 passes through a filter that drops, recursively, keys containing the words
 `latitude`, `longitude`, `polyline`, `geo`, `location`, `owner`, `fullname`,
-`displayname` or `email`, or the word pairs "full name", "display name",
-"profile image" or "user info". Keys are split into words (camelCase or
+`displayname`, `email` or `description`, or the word pairs "full name",
+"display name", "profile image", "user info", "activity name" or "course
+name" (Garmin names activities after the place, e.g. "Poznan Running"). Keys are split into words (camelCase or
 snake_case) and compared whole, so `averageOxygen…` and `timeAllocation` are
 kept. Elevation and time zone are left in: they're coarse.
 
