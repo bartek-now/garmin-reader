@@ -13,15 +13,21 @@ Garmin. Three layers make sure of that:
 
 1. stub() refuses to replace an attribute the real client doesn't have, so
    a rename fails before any request is attempted;
-2. the network is blocked for requests and curl_cffi (which garminconnect
-   uses for token refresh and login), and every proxy variable points at a
-   closed local port, so any other HTTP client can't reach Garmin either;
+2. the network is blocked three ways: requests and curl_cffi (which
+   garminconnect uses for token refresh and login) are patched; every proxy
+   variable points at a closed local port, for any other HTTP client; and
+   DNS lookups and socket connections to anything but this machine fail,
+   whatever library makes them;
 3. every test checks the fake Garmin saw the requests it expects, so a
    result produced some other way doesn't count.
 """
 
 import asyncio
+import ipaddress
 import json
+import socket
+import urllib.error
+import urllib.request
 
 import pytest
 import requests
@@ -97,6 +103,69 @@ def offline(monkeypatch):
         monkeypatch.setenv(var.lower(), "http://127.0.0.1:9")
     for var in ("NO_PROXY", "no_proxy"):
         monkeypatch.delenv(var, raising=False)
+    # And whatever Python code opens a socket can only reach this machine.
+    # (Loopback stays allowed: the event loop talks to itself over a local
+    # socket on Windows, and the proxy above is local.)
+    real_getaddrinfo, real_connect = socket.getaddrinfo, socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host is not None and not _is_local(host):
+            raise AssertionError(f"tried to look up {host!r}")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def check(address):
+        host = address[0] if isinstance(address, tuple) else address
+        if not _is_local(host):
+            raise AssertionError(f"tried to connect to {address!r}")
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect",
+                        lambda self, address: check(address) or real_connect(self, address))
+    monkeypatch.setattr(socket.socket, "connect_ex",
+                        lambda self, address: check(address) or real_connect_ex(self, address))
+
+
+def _is_local(host) -> bool:
+    host = host.decode() if isinstance(host, bytes) else str(host)
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+# --- the safety net itself -------------------------------------------------------
+
+
+def test_offline_blocks_dns():
+    with pytest.raises(AssertionError, match="look up 'connectapi.garmin.com'"):
+        socket.getaddrinfo("connectapi.garmin.com", 443)
+
+
+def test_offline_blocks_raw_sockets():
+    with socket.socket() as s, pytest.raises(AssertionError, match="connect to"):
+        s.connect(("8.8.8.8", 443))  # an IP, so no DNS lookup involved
+    with pytest.raises(AssertionError):
+        socket.create_connection(("connectapi.garmin.com", 443), timeout=1)
+
+
+def test_offline_sends_unpatched_http_clients_to_the_closed_proxy():
+    # urllib isn't patched: it goes to the proxy and is refused there. Had it
+    # looked up Garmin's name instead, the DNS block would have raised
+    # AssertionError, not URLError.
+    with pytest.raises(urllib.error.URLError) as err:
+        urllib.request.urlopen("https://connectapi.garmin.com/", timeout=5)
+    assert isinstance(err.value.reason, ConnectionRefusedError)
+
+
+def test_offline_blocks_requests_and_curl_cffi():
+    with pytest.raises(AssertionError, match="network"):
+        requests.get("https://connectapi.garmin.com/")
+    cffi = pytest.importorskip("curl_cffi.requests")
+    with pytest.raises(AssertionError, match="network"):
+        cffi.post("https://diauth.garmin.com/")
 
 
 @pytest.fixture
