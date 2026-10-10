@@ -32,6 +32,7 @@ from garminconnect import (
 )
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.responses import JSONResponse
 
 from kcal import endpoints, summary
 from kcal.auth import GarminLoginError, login
@@ -331,7 +332,7 @@ def build_server(
     kwargs = {}
     if http is not None:
         kwargs = dict(
-            host="127.0.0.1",
+            host=http.host,
             port=http.port,
             # No MCP sessions: each request stands alone, so server restarts
             # don't strand clients. Replies are plain JSON, not SSE streams,
@@ -356,6 +357,8 @@ def build_server(
             raise ValueError("OAuth needs HTTP settings with the public URL and Garmin owner")
         kwargs.update(auth_server_provider=oauth, auth=auth_settings(http.public_url))
     server = FastMCP("kcal", **kwargs)
+    if http is not None:
+        server.custom_route("/healthz", methods=["GET"])(_healthz)
     exposure = LOCAL if http is None else REMOTE
     if oauth is not None:
         page = LoginPage(
@@ -370,6 +373,14 @@ def build_server(
             customize(tool, exposure)
         server.tool(structured_output=False)(tool)
     return server
+
+
+async def _healthz(request) -> JSONResponse:
+    """For the host's health checks: the server process is up. Needs no
+    sign-in and says nothing else. It deliberately doesn't check Garmin: an
+    outage there would make the host restart a healthy server over and over.
+    """
+    return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
 
 def _describe_day_metrics(tool, exposure: _Exposure) -> None:
@@ -411,7 +422,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--port", metavar="N",
-        help="Local port to listen on, on 127.0.0.1 (default: $KCAL_PORT or 8000)",
+        help="Port to listen on (default: $KCAL_PORT, else $PORT, else 8000)",
+    )
+    parser.add_argument(
+        "--host", metavar="IP",
+        help="Address to listen on (default: $KCAL_HOST or 127.0.0.1; "
+        "0.0.0.0 in a container)",
     )
     parser.add_argument(
         "--garmin-owner", metavar="ID",
@@ -435,7 +451,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         http = HttpSettings.from_env(
-            public_url=args.public_url, port=args.port, garmin_owner=args.garmin_owner
+            public_url=args.public_url, port=args.port, garmin_owner=args.garmin_owner,
+            host=args.host,
         )
         if http.garmin_owner is None:
             raise ValueError(
@@ -448,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     oauth = KcalOAuthProvider(state_dir() / "mcp_auth.sqlite", http.public_url)
     print(
-        f"kcal-mcp: serving {http.public_url}/mcp from 127.0.0.1:{http.port}; "
+        f"kcal-mcp: serving {http.public_url}/mcp from {http.host}:{http.port}; "
         f"clients sign in at {http.public_url}/login",
         file=sys.stderr,
     )

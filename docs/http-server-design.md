@@ -273,11 +273,20 @@ refused before any code runs.
 
 ## 7. Moving to an always-on host later
 
-- Use a stable hostname (named Cloudflare Tunnel or the host's own domain) so
-  connectors don't need re-adding.
-- Add a Dockerfile and a `/healthz` route.
-- Copy `garmin_tokens/` and `mcp_auth.sqlite` to the host's state volume.
-- Add the Google/GitHub sign-in step in front of the Garmin form.
+Done so far (independent of the host): `KCAL_HOST` and the `PORT` fallback,
+a Dockerfile, a `/healthz` route, and [deployment.md](deployment.md), which
+covers what any host must provide, settings, Garmin sign-in on the host and
+moving state.
+
+Still depends on the choice of host:
+
+- The HTTPS front end and a stable hostname (platform-provided, a reverse
+  proxy, or a named Cloudflare Tunnel), so connectors don't need re-adding.
+- How the persistent volume is provided.
+- Whether Garmin accepts sign-ins from that host's addresses.
+- The Google/GitHub sign-in step in front of the Garmin form (needs the
+  stable URL).
+- Deployment automation.
 
 ## Build order
 

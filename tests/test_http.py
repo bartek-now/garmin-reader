@@ -317,3 +317,63 @@ def test_does_not_log_success_or_404(logged_client, caplog):
     assert post(logged_client, INIT).status_code == 200
     assert logged_client.get("/.well-known/oauth-protected-resource").status_code == 404
     assert rejections(caplog) == []
+
+
+# --- running on a host --------------------------------------------------------
+
+
+def test_host_defaults_to_loopback():
+    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC}).host == "127.0.0.1"
+
+
+@pytest.mark.parametrize("value", ["0.0.0.0", "::", "10.0.0.5"])
+def test_host_from_env(value):
+    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "KCAL_HOST": value}).host == value
+
+
+def test_host_flag_wins_over_env():
+    s = HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "KCAL_HOST": "0.0.0.0"}, host="::1")
+    assert s.host == "::1"
+
+
+@pytest.mark.parametrize("value", ["example.com", "0.0.0.0:8000", "everywhere"])
+def test_host_must_be_an_ip(value):
+    with pytest.raises(ValueError, match="KCAL_HOST"):
+        HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "KCAL_HOST": value})
+
+
+def test_platform_port_is_used_when_kcal_port_isnt_set():
+    # Cloud Run and similar platforms tell the server its port in $PORT.
+    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "PORT": "8080"}).port == 8080
+    s = HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "PORT": "8080", "KCAL_PORT": "9000"})
+    assert s.port == 9000
+
+
+def test_main_listens_where_told(runs, monkeypatch):
+    monkeypatch.setenv("KCAL_PUBLIC_URL", PUBLIC)
+    monkeypatch.setenv("KCAL_GARMIN_OWNER", "42")
+    monkeypatch.setenv("KCAL_HOST", "0.0.0.0")
+    assert mcp_server.main(["--http"]) == 0
+    [(server, _)] = runs
+    assert server.settings.host == "0.0.0.0"
+
+
+def test_healthz_needs_no_sign_in_and_says_nothing_else(tmp_path):
+    from kcal.oauth import KcalOAuthProvider
+
+    provider = KcalOAuthProvider(tmp_path / "a.sqlite", PUBLIC)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=1), provider)
+    with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
+        assert post(c, INIT).status_code == 401  # /mcp still needs a token
+        # Health checks often come from inside the platform, with any Host.
+        r = c.get("/healthz", headers={"Host": "10.0.0.5:8000"})
+        assert r.status_code == 200 and r.json() == {"status": "ok"}
+        assert r.headers["cache-control"] == "no-store"
+        assert c.post("/healthz").status_code == 405
+    provider.close()
+
+
+def test_healthz_does_not_touch_garmin(client, monkeypatch):
+    monkeypatch.setattr(mcp_server, "_api", None)
+    monkeypatch.setattr(mcp_server, "login", lambda **_: pytest.fail("contacted Garmin"))
+    assert client.get("/healthz").status_code == 200

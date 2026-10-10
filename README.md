@@ -116,9 +116,11 @@ Claude Desktop / Claude Code config (stdio):
 
 ### Over HTTP
 
-`kcal-mcp --http` serves the same tools over Streamable HTTP at `/mcp` on
-`127.0.0.1`, for remote clients such as claude.ai and ChatGPT reaching it
-through a tunnel. See [docs/http-server-design.md](docs/http-server-design.md).
+`kcal-mcp --http` serves the same tools over Streamable HTTP at `/mcp`, for
+remote clients such as claude.ai and ChatGPT reaching it through a tunnel or
+on an always-on host (the [Dockerfile](Dockerfile) and
+[docs/deployment.md](docs/deployment.md)). See
+[docs/http-server-design.md](docs/http-server-design.md).
 Over HTTP, the tools only reach an allowlist of health and fitness endpoints
 (`REMOTE_ALLOWED` in `endpoints.py`), and location and identity data
 (coordinates, GPS tracks, place names, your name and profile photo) is
@@ -142,5 +144,6 @@ the tools answer with a link to the same page.
 |---|---|---|
 | `KCAL_PUBLIC_URL` | `--public-url` | required, e.g. `https://abc.trycloudflare.com` |
 | `KCAL_GARMIN_OWNER` | `--garmin-owner` | required; your Garmin profile ID from `kcal whoami` |
-| `KCAL_PORT` | `--port` | `8000` |
+| `KCAL_PORT` | `--port` | `$PORT`, else `8000` |
+| `KCAL_HOST` | `--host` | `127.0.0.1` (`0.0.0.0` in a container) |
 | `KCAL_STATE_DIR` | | `~/.kcal` (Garmin tokens, shared with `kcal fetch`; `mcp_auth.sqlite` with OAuth clients and hashed tokens) |
