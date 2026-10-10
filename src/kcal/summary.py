@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
-from garminconnect import GarminConnectAuthenticationError
+from garminconnect import GarminConnectAuthenticationError, GarminConnectTooManyRequestsError
 
 from kcal.auth import GarminLoginError
 from kcal.client import fetch_activities, fetch_day_summary, fetch_weigh_ins
@@ -209,9 +209,10 @@ def summarize(api: Any, days: list[date], groups: list[str]) -> dict:
     return out
 
 
-# Problems with the Garmin session affect every group, so they fail the call
-# (and the MCP server turns them into "sign in again" instructions).
-_LOGIN_ERRORS = (GarminLoginError, GarminConnectAuthenticationError)
+# Problems with the Garmin session, and Garmin rate-limiting, affect every
+# group, so they fail the call once (the MCP server turns them into "sign in
+# again" or "try again in a few minutes").
+_LOGIN_ERRORS = (GarminLoginError, GarminConnectAuthenticationError, GarminConnectTooManyRequestsError)
 
 
 def _message(err: Exception) -> str:

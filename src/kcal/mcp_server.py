@@ -121,12 +121,15 @@ def _login_error(err: Exception) -> GarminLoginError:
     if isinstance(err, (GarminConnectConnectionError, GarminConnectTooManyRequestsError)):
         # Garmin unreachable or limiting requests: passes on its own, and
         # sending the owner to sign in would only spend sign-in attempts.
-        return GarminLoginError(
-            "Garmin is unreachable or limiting requests right now, so kcal can't "
-            "read Garmin data. This usually passes on its own: try again in a few "
-            "minutes. There's no need to sign in again or reconnect the connector."
-        )
+        return GarminLoginError(GARMIN_BUSY_MESSAGE)
     return GarminLoginError(garmin_expired_message(url))
+
+
+GARMIN_BUSY_MESSAGE = (
+    "Garmin is unreachable or limiting requests right now, so kcal can't read "
+    "Garmin data. This usually passes on its own: try again in a few minutes. "
+    "There's no need to sign in again or reconnect the connector."
+)
 
 
 def garmin_expired_message(login_url: str) -> str:
@@ -201,6 +204,9 @@ def _wrap(fn, exposure: _Exposure):
             # Garmin rejected the session mid-call (expired or revoked).
             _reset_api()
             raise _login_error(err) from err
+        except GarminConnectTooManyRequestsError as err:
+            # Garmin rate-limited a request mid-call; the session is fine.
+            raise RuntimeError(GARMIN_BUSY_MESSAGE) from err
         finally:
             _exposure.reset(token)
         return endpoints.to_json(endpoints.cap_size(result))
