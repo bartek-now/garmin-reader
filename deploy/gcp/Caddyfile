@@ -1,0 +1,3 @@
+{$KCAL_DOMAIN} {
+	reverse_proxy kcal:8000
+}

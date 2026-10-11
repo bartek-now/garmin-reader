@@ -1,0 +1,51 @@
+# kcal on one VM: the server, with Caddy in front of it for HTTPS
+# (certificates from Let's Encrypt, renewed automatically).
+# Settings come from .env next to this file (written by setup-vm.sh).
+# See docs/deployment.md, "Google Cloud VM".
+name: kcal
+
+services:
+  kcal:
+    build: ../..
+    restart: unless-stopped
+    environment:
+      KCAL_PUBLIC_URL: https://${KCAL_DOMAIN:?set KCAL_DOMAIN in .env}
+      KCAL_GARMIN_OWNER: ${KCAL_GARMIN_OWNER:?set KCAL_GARMIN_OWNER in .env}
+      # Caddy's address, so logs show the real client from X-Forwarded-For.
+      FORWARDED_ALLOW_IPS: 172.30.0.10
+    volumes:
+      - kcal-data:/data
+    networks: [web]
+    # No published port: only Caddy can reach the server.
+
+  caddy:
+    image: caddy:2.10.2
+    restart: unless-stopped
+    ports:
+      - "80:80"   # certificate checks and the redirect to HTTPS
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      KCAL_DOMAIN: ${KCAL_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data   # certificates
+      - caddy-config:/config
+    networks:
+      web:
+        ipv4_address: 172.30.0.10
+    depends_on: [kcal]
+
+networks:
+  web:
+    ipam:
+      config:
+        # Fixed range so Caddy's address is known; other containers get
+        # addresses from ip_range, which leaves Caddy's free.
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
+
+volumes:
+  kcal-data:     # Garmin tokens and the OAuth database
+  caddy-data:
+  caddy-config:
