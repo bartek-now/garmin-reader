@@ -235,10 +235,11 @@ activity endpoints also carry the owner's identity (`ownerFullName`,
 `full_name` and `user_profile` is meant to keep out. In HTTP mode every result
 passes through a filter that drops, recursively, keys containing the words
 `latitude`, `longitude`, `polyline`, `geo`, `location`, `owner`, `fullname`,
-`displayname`, `email` or `description`, or the word pairs "full name",
-"display name", "profile image", "user info", "activity name" or "course
-name", or "workout name" (these titles can contain places). Keys are split into words (camelCase or
-snake_case) and compared whole, so `averageOxygen…` and `timeAllocation` are
+`displayname`, `email`, `description`, `chronological`, `birth`, `birthdate`
+or `birthday` (actual age and birth date; Garmin's fitness age is kept), or
+the word pairs "full name", "display name", "profile image", "user info",
+"activity name", "course name" or "workout name" (these titles can contain
+places). Keys are split into words (camelCase or snake_case) and compared whole, so `averageOxygen…` and `timeAllocation` are
 kept. Elevation and time zone are left in: they're coarse.
 
 The allowlist lives in `endpoints.py` as one explicit set, so new

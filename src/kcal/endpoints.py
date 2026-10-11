@@ -93,7 +93,8 @@ REMOTE_ALLOWED = frozenset({
 
 # Results sent over HTTP drop every key whose name contains one of these
 # words: coordinates, GPS tracks and place names reveal where the owner lives
-# and trains; names, profile photos and e-mail identify them; activity and
+# and trains; names, profile photos, e-mail, actual age and birth date
+# identify them (Garmin's fitness age, `fitnessAge`, is kept); activity and
 # course names (Garmin names activities after the place, e.g. "Poznan
 # Running") and free-text descriptions can contain either. Keys are split
 # into words (camelCase or snake_case) and compared whole, so e.g.
@@ -101,6 +102,7 @@ REMOTE_ALLOWED = frozenset({
 PRIVATE_KEY_WORDS = frozenset({
     "latitude", "longitude", "polyline", "geo", "location",
     "owner", "fullname", "displayname", "email", "description",
+    "chronological", "birth", "birthdate", "birthday",
 })
 # ...or one of these consecutive word pairs.
 PRIVATE_KEY_PHRASES = frozenset({

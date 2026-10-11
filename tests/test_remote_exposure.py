@@ -215,6 +215,54 @@ def test_remote_workout_names_do_not_expose_places(api, remote, endpoint, args):
                    "lapDTOs": [{"distance": 1000}]}
 
 
+def test_actual_age_is_stripped_but_fitness_age_kept():
+    fitness_age = {
+        "chronologicalAge": 41, "fitnessAge": 33.5, "achievableFitnessAge": 31.0,
+        "previousFitnessAge": 34.0, "components": {"rhr": {"value": 48}},
+        "userData": {"birthDate": "1985-01-01", "dateOfBirth": "1985-01-01", "birthday": "01-01"},
+    }
+    assert endpoints.strip_private(fitness_age) == {
+        "fitnessAge": 33.5, "achievableFitnessAge": 31.0, "previousFitnessAge": 34.0,
+        "components": {"rhr": {"value": 48}}, "userData": {},
+    }
+
+
+# Shaped like a real get_fitnessage_data response; 47 is the owner's real age.
+REAL_AGE = 47
+FITNESS_AGE = {
+    "chronologicalAge": REAL_AGE, "fitnessAge": 38.2, "achievableFitnessAge": 35.0,
+    "previousFitnessAge": 39.0,
+    "components": {"rhr": {"value": 48}, "bmi": {"value": 23.1}, "vigorousDaysAvg": {"value": 3.4}},
+    "lastUpdated": "2026-10-11T07:00:00.0",
+}
+
+
+class FitnessAgeApi:
+    def get_fitnessage_data(self, cdate):
+        return FITNESS_AGE
+
+
+def has_value(value, wanted) -> bool:
+    if isinstance(value, dict):
+        return any(has_value(v, wanted) for v in value.values())
+    if isinstance(value, list):
+        return any(has_value(v, wanted) for v in value)
+    return value == wanted
+
+
+@pytest.mark.parametrize("tool, args", [
+    ("call_garmin_endpoint", {"endpoint": "get_fitnessage_data", "args": {"cdate": "2026-10-11"}}),
+    ("get_garmin_day", {"date": "2026-10-11", "metrics": ["fitnessage_data"]}),
+])
+def test_remote_results_never_carry_the_real_age(remote, monkeypatch, tool, args):
+    monkeypatch.setattr(mcp_server, "_api", FitnessAgeApi())
+    out = call(remote, tool, args)
+    data = out if tool == "call_garmin_endpoint" else out["fitnessage_data"]
+    # The real age is gone, wherever it might hide; fitness age stays.
+    assert not has_value(out, REAL_AGE)
+    assert data["fitnessAge"] == 38.2 and data["components"]["rhr"] == {"value": 48}
+
+
 def test_remote_day_results_are_stripped(api, remote):
     out = call(remote, "get_garmin_day", {"date": "d", "metrics": ["sleep_data"]})
     assert out["sleep_data"] == endpoints.strip_private(LOCATED)
