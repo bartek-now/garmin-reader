@@ -1,0 +1,4 @@
+# Run on Linux (the VM, the container) as they are: keep Unix line endings
+# on checkout, even on Windows.
+*.sh text eol=lf
+Dockerfile text eol=lf

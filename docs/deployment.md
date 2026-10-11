@@ -1,7 +1,8 @@
 # Deploying the HTTP MCP server
 
 How to run `kcal-mcp --http` on an always-on host instead of a PC behind a
-quick tunnel. Everything here applies to any host; choosing one is separate.
+quick tunnel. Most of this applies to any host; [Google Cloud VM](#google-cloud-vm)
+is the ready-made setup for one.
 Background: [http-server-design.md](http-server-design.md).
 
 ## What the host must provide
@@ -85,6 +86,60 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
   in there fixes it without reconnecting anything.
 - **Logs** go to stdout: every request's status line, plus the reason for any
   rejected one (never payloads, passwords or tokens).
+
+## Google Cloud VM
+
+[deploy/gcp/](../deploy/gcp/) runs the server on a free-tier e2-micro VM, with
+[Caddy](https://caddyserver.com) in front for HTTPS (Let's Encrypt
+certificates, renewed automatically):
+
+- `deploy.ps1` runs on your PC, in PowerShell. It creates what's missing in
+  the Google Cloud project (a static IP `kcal-mcp-ip`, a firewall rule
+  `kcal-mcp-web` for ports 80 and 443, and the VM `kcal-mcp`), then runs
+  `setup-vm.sh` on the VM.
+- `setup-vm.sh` installs Docker, checks out the requested commit from GitHub
+  into `/opt/kcal`, writes the settings to `deploy/gcp/.env` there and
+  starts [compose.yaml](../deploy/gcp/compose.yaml): the server (port 8000,
+  reachable only by Caddy) and Caddy (ports 80 and 443).
+
+The VM runs Debian 12 with a 30 GB standard disk and no service account (it
+needs no Google Cloud access). The free tier covers one e2-micro in
+`us-east1`, `us-central1` or `us-west1` and its disk. The static IP may be
+billed separately; check the project's billing.
+
+**First deployment:**
+
+1. `gcloud auth login` with the Google account that owns the project, then
+   `gcloud config set project <project>` (the project needs billing enabled,
+   even for the free tier).
+2. `.\deploy\gcp\deploy.ps1 -Domain garminmcp.example.com -GarminOwner <id>`
+   (`kcal whoami` prints the ID; `-Project` picks a project other than
+   gcloud's current one).
+3. Add a DNS `A` record for the hostname pointing at the IP the script
+   prints. If the DNS is on Cloudflare, leave the record unproxied (grey
+   cloud), so Caddy can get its certificate.
+4. Sign in to Garmin at `https://<hostname>/login`, then add the connector in
+   Claude or ChatGPT with `https://<hostname>/mcp`.
+
+**Updating:** push to GitHub, then run `deploy.ps1` again with the same
+arguments (`-Ref` picks a branch, tag or commit; default `master`). It rebuilds and restarts; the volumes survive.
+
+**On the VM** (`gcloud compute ssh kcal-mcp --zone us-east1-b`), from
+`/opt/kcal/deploy/gcp`:
+
+- logs: `sudo docker compose logs -f kcal`;
+- signing everyone out: `sudo docker compose exec kcal kcal-mcp --revoke-all`;
+- if Garmin refuses the sign-in from the VM (see above), copy the token file
+  to the VM (`gcloud compute scp`), then into the volume, owned by the
+  server's user:
+
+  ```bash
+  sudo docker compose exec -u root kcal mkdir -p /data/garmin_tokens
+  sudo docker compose cp garmin_tokens.json kcal:/data/garmin_tokens/
+  sudo docker compose exec -u root kcal sh -c 'chown -R kcal:kcal /data/garmin_tokens && chmod 600 /data/garmin_tokens/*'
+  sudo docker compose restart kcal
+  rm garmin_tokens.json
+  ```
 
 ## Security
 

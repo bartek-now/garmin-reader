@@ -302,7 +302,8 @@ refused before any code runs.
 Done so far (independent of the host): `KCAL_HOST` and the `PORT` fallback,
 a Dockerfile, a `/healthz` route, and [deployment.md](deployment.md), which
 covers what any host must provide, settings, Garmin sign-in on the host and
-moving state.
+moving state. For a Google Cloud e2-micro VM with Caddy in front,
+[deploy/gcp/](../deploy/gcp/) creates and updates everything.
 
 Still depends on the choice of host:
 
