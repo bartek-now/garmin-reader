@@ -75,7 +75,32 @@ class GarminGateway:
         return api, status == "needs_mfa"
 
     def finish(self, api: Any, code: str) -> None:
-        api.resume_login(None, code)
+        """Check the verification code. If the check failed without Garmin
+        ever answering about the code (timeouts, server errors, bot-check
+        pages), raise GarminVerificationUnavailable: garminconnect reports
+        that as the same authentication error as a wrong code, so the
+        answers are watched as they arrive instead.
+        """
+        client = api.client
+        session = getattr(client, "_mfa_session", None)
+        watched = None
+        if session is not None:
+            watched = _WatchedSession(session, widget=getattr(client, "_mfa_flow", None) == "widget")
+            client._mfa_session = watched
+        try:
+            api.resume_login(None, code)
+        except GarminConnectTooManyRequestsError:
+            raise  # already says what happened
+        except Exception as err:
+            # Whatever the library made of it (an authentication error, or
+            # in the widget flow the raw transport error), no answer about
+            # the code means Garmin was unavailable.
+            if watched is not None and watched.asked and not watched.answered:
+                raise GarminVerificationUnavailable("Garmin didn't answer the code check") from err
+            raise
+        finally:
+            if watched is not None and client._mfa_session is watched:
+                client._mfa_session = session
 
     def mfa_pending(self, api: Any) -> bool:
         """Whether Garmin still holds the verification step open. garminconnect
@@ -98,6 +123,61 @@ class GarminGateway:
 
 class IncompleteSession(Exception):
     pass
+
+
+class GarminVerificationUnavailable(GarminConnectConnectionError):
+    """Garmin's code check didn't answer: temporary, not a wrong code."""
+
+
+class _WatchedSession:
+    """Stands in for garminconnect's MFA session while a code is checked,
+    noting whether any verification POST got an actual answer from Garmin.
+    Everything else goes to the real session unchanged.
+    """
+
+    def __init__(self, session: Any, widget: bool):
+        self._session = session
+        self._widget = widget
+        self.asked = 0
+        self.answered = False
+
+    def post(self, *args, **kwargs):
+        self.asked += 1
+        response = self._session.post(*args, **kwargs)  # a transport failure: no answer
+        if _answered(response, self._widget):
+            self.answered = True
+        return response
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+
+def _answered(response: Any, widget: bool) -> bool:
+    """Whether Garmin answered about the code. Doubtful cases count as an
+    answer, so a wrong code is never mistaken for an outage (which isn't
+    counted toward the failure limit).
+    """
+    status = getattr(response, "status_code", None)
+    if status is None:
+        return True
+    if _no_answer_status(status):
+        return False
+    if widget:
+        return True  # the widget flow answers with an HTML page
+    try:
+        body = response.json()  # the portal and mobile flows answer in JSON
+    except Exception:
+        return False  # e.g. a bot-check page instead of an answer
+    # Garmin also reports rate limits and failures inside a 200's JSON body
+    # (error.status-code, e.g. "429"), which garminconnect treats as such.
+    error = body.get("error") if isinstance(body, dict) else None
+    code = str(error.get("status-code", "")) if isinstance(error, dict) else ""
+    return not (code.isdigit() and _no_answer_status(int(code)))
+
+
+def _no_answer_status(status: int) -> bool:
+    """Timeouts, rate limits and server errors: Garmin didn't decide anything."""
+    return status in (408, 429) or status >= 500
 
 
 @dataclass
@@ -174,10 +254,12 @@ class LoginPage:
             flow = str(form.get("flow", ""))
             code = str(form.get("code", "")).strip()
             finished = self._mfa.get(flow)
-            if finished is not None and finished.completed is not None:
+            if (finished is not None and finished.completed is not None
+                    and finished.expires_at > time.time()):
                 # The step already succeeded: whatever was submitted, send the
                 # browser where the success went (even for a code whose
-                # earlier failure is remembered).
+                # earlier failure is remembered). Only while the step lasts:
+                # after that the redirect's code has expired too.
                 return self._replay(finished.completed)
             # Keyed by the code too: a repeated submission of the same code is
             # replayed, but a corrected code is really tried.
@@ -202,20 +284,31 @@ class LoginPage:
             await seen.done.wait()
             if seen.response is not None:
                 return self._replay(seen.response)
+            # The first one failed outright: this one tries for itself.
         while len(self._submissions) >= MAX_MFA_FLOWS * 5:
             del self._submissions[min(self._submissions, key=lambda k: self._submissions[k].expires_at)]
         entry = self._submissions[key] = _Submission(anyio.Event(), now + MFA_SECONDS)
         try:
             response = await run()
+            # Duplicates already waiting get this answer whatever it is.
+            entry.response = self._snapshot(response)
             if response.status_code == 429 or not getattr(response, "kcal_replayable", True):
-                # Paused, or Garmin failed temporarily: the same form must
-                # really be tried again later, not get this answer again.
-                del self._submissions[key]
-            else:
-                entry.response = self._snapshot(response)
+                # Paused, or Garmin failed temporarily: later submissions of
+                # the same form must really be tried, not get this answer.
+                self._forget(key, entry)
             return response
+        except BaseException:
+            self._forget(key, entry)
+            raise
         finally:
             entry.done.set()
+
+    def _forget(self, key: str, entry: _Submission) -> None:
+        """Remove `entry`, but only if it's still the one stored under `key`:
+        another submission may have replaced it meanwhile.
+        """
+        if self._submissions.get(key) is entry:
+            del self._submissions[key]
 
     @staticmethod
     def _snapshot(response: Response) -> tuple[int, bytes, list]:
@@ -261,13 +354,13 @@ class LoginPage:
                 "The verification step expired or was already used.", request_id,
             )
         async with flow.lock:
-            if flow.completed is not None:
-                # Already finished, e.g. by an earlier submission with another
-                # code: send the browser where that one went, not to an error.
-                return self._replay(flow.completed)
             if flow.expires_at <= time.time():
                 # Expired while this submission waited for the one before it.
                 self._mfa.pop(flow_id, None)
+            elif flow.completed is not None:
+                # Already finished, e.g. by an earlier submission with another
+                # code: send the browser where that one went, not to an error.
+                return self._replay(flow.completed)
             if self._mfa.get(flow_id) is not flow:
                 return self._dead_end(
                     request, "Sign-in expired",
@@ -288,7 +381,8 @@ class LoginPage:
                             # Temporary: the same code may well work later.
                             retry.kcal_replayable = False
                         return retry
-                    del self._mfa[flow_id]
+                    # Another submission may have removed it meanwhile (expiry).
+                    self._mfa.pop(flow_id, None)
                     return self._form(request, flow.request_id, error=message)
                 response = await self._finish(request, flow.api, flow.request_id)
                 flow.completed = self._snapshot(response)

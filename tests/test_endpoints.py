@@ -221,3 +221,16 @@ def test_range_dates_must_be_dates():
     with pytest.raises(ValueError, match="start must be a date"):
         endpoints.call_endpoint(api, "get_sleep_daily", {"start": "last year", "end": "2026-10-01"})
     assert api.calls == []
+
+
+@pytest.mark.parametrize("endpoint", sorted(endpoints.MISSING_END_IS_START))
+def test_old_single_day_allowed_where_missing_end_means_that_day(endpoint):
+    api = Recorder()
+    endpoints.call_endpoint(api, endpoint, {"startdate": "2020-01-01"} if endpoint != "get_device_solar_data"
+                            else {"device_id": "1", "startdate": "2020-01-01"})
+    assert api.calls == [endpoint]
+
+
+def test_span_error_explains_how_to_ask_for_one_day():
+    with pytest.raises(ValueError, match="give enddate the same date as startdate"):
+        endpoints.call_endpoint(Recorder(), "get_activities_by_date", {"startdate": "2020-01-01"})

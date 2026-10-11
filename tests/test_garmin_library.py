@@ -25,6 +25,7 @@ Garmin. Three layers make sure of that:
 """
 
 import asyncio
+import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import ipaddress
 import json
@@ -45,7 +46,7 @@ from garminconnect import (
 )
 from mcp.server.fastmcp.exceptions import ToolError
 
-from kcal import mcp_server
+from kcal import endpoints, mcp_server
 from kcal.auth import GarminRefreshUnavailable, _guard_token_refresh
 from kcal.oauth import KcalOAuthProvider
 from kcal.settings import HttpSettings
@@ -593,9 +594,15 @@ class FakeSSO:
         self.answers = list(answers)
         self.codes = []
 
-    def post(self, url, params=None, headers=None, json=None, timeout=None):
-        self.codes.append(json["mfaVerificationCode"])
-        status, body = self.answers.pop(0)
+    def post(self, url, params=None, headers=None, json=None, data=None, timeout=None):
+        # Portal and mobile send the code as JSON, the widget as a form.
+        self.codes.append(json["mfaVerificationCode"] if json else data["mfa-code"])
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, requests.Response):
+            return answer
+        status, body = answer
         return response(status, body, url)
 
 
@@ -637,6 +644,104 @@ def test_rate_limited_mfa_code_leaves_the_step_open(garmin):
     assert GarminGateway().mfa_pending(garmin)
 
 
+def page(status: int, text: str) -> requests.Response:
+    """A response whose body is `text` as is (HTML, or broken JSON)."""
+    r = response(status, None)
+    r._content = text.encode()
+    return r
+
+
+TIMEOUT = requests.exceptions.ReadTimeout("Read timed out")
+SERVER_ERROR = (503, {"error": {"status-code": "503"}})  # JSON, but no answer
+JSON_LIMITED = (200, {"error": {"status-code": "429"}})  # a 200 saying "rate limited"
+BOT_CHECK = "bot-check"  # a non-JSON page instead of an answer
+
+
+def portal_answers(answers):
+    return [page(403, "<html>Just a moment...</html>") if a == BOT_CHECK else a for a in answers]
+
+
+@pytest.mark.parametrize("answers", [
+    [TIMEOUT, TIMEOUT],
+    [SERVER_ERROR, SERVER_ERROR],
+    [BOT_CHECK, BOT_CHECK],
+    [SERVER_ERROR, TIMEOUT],
+    [LIMITED, TIMEOUT],
+    [JSON_LIMITED, TIMEOUT],
+    [TIMEOUT, JSON_LIMITED],
+    [(200, {"error": {"status-code": "503"}}), BOT_CHECK],
+])
+def test_portal_code_check_that_got_no_answer_is_unavailable(garmin, answers):
+    # garminconnect raises the same authentication error for these as for a
+    # wrong code; GarminGateway.finish tells them apart by watching answers.
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    sso = awaiting_code(garmin, portal_answers(answers))
+    with pytest.raises(GarminVerificationUnavailable):
+        GarminGateway().finish(garmin, "123456")
+    assert GarminGateway().mfa_pending(garmin)  # the step is still open
+    assert garmin.client._mfa_session is sso  # and its session is restored
+
+
+@pytest.mark.parametrize("answers", [
+    [WRONG, TIMEOUT], [TIMEOUT, WRONG], [WRONG, WRONG],
+    [WRONG, JSON_LIMITED],  # one real answer is enough
+    [(200, {"error": {"status-code": "401"}}), TIMEOUT],  # a 4xx decision is an answer
+])
+def test_portal_wrong_code_is_still_a_wrong_code(garmin, answers):
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    awaiting_code(garmin, answers)
+    with pytest.raises(GarminConnectAuthenticationError) as err:
+        GarminGateway().finish(garmin, "000000")
+    assert not isinstance(err.value, GarminVerificationUnavailable)
+
+
+@pytest.mark.parametrize("answers", [[LIMITED, LIMITED], [JSON_LIMITED, JSON_LIMITED], [LIMITED, JSON_LIMITED]])
+def test_portal_rate_limit_passes_through(garmin, answers):
+    from kcal.login_page import GarminGateway
+
+    awaiting_code(garmin, answers)
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        GarminGateway().finish(garmin, "123456")
+
+
+def awaiting_widget_code(garmin, answers):
+    """The client as a widget-flow login that needs a code leaves it."""
+    sso = awaiting_code(garmin, answers)
+    garmin.client._mfa_flow = "widget"
+    garmin.client._widget_last_resp = page(200, '<input name="_csrf" value="token-1"/>')
+    return sso
+
+
+@pytest.mark.parametrize("answer", [TIMEOUT, (503, {}), (500, {})])
+def test_widget_code_check_that_got_no_answer_is_unavailable(garmin, answer):
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    awaiting_widget_code(garmin, [answer if answer is TIMEOUT else page(answer[0], "<html>Error</html>")])
+    with pytest.raises(GarminVerificationUnavailable):
+        GarminGateway().finish(garmin, "123456")
+    assert GarminGateway().mfa_pending(garmin)
+
+
+def test_widget_wrong_code_is_still_a_wrong_code(garmin):
+    # The widget answers in HTML: a page that isn't "Success" is an answer.
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    awaiting_widget_code(garmin, [page(200, "<html><title>Enter MFA code</title></html>")])
+    with pytest.raises(GarminConnectAuthenticationError) as err:
+        GarminGateway().finish(garmin, "000000")
+    assert not isinstance(err.value, GarminVerificationUnavailable)
+
+
+def test_widget_rate_limit_passes_through(garmin):
+    from kcal.login_page import GarminGateway
+
+    awaiting_widget_code(garmin, [page(429, "")])
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        GarminGateway().finish(garmin, "123456")
+
+
 def test_corrected_code_signs_in_and_closes_the_step(garmin):
     from kcal.login_page import GarminGateway
 
@@ -652,3 +757,43 @@ def test_corrected_code_signs_in_and_closes_the_step(garmin):
     garmin.resume_login(None, "123456")
     assert tickets == ["ST-1"] and sso.codes[-1] == "123456"
     assert not GarminGateway().mfa_pending(garmin)
+
+
+# --- what a missing end date means (endpoints.MISSING_END_IS_START) ----------------
+
+
+class RecordingApi:
+    """Records each API request's path and query; answers with nothing."""
+
+    def __init__(self):
+        self.requests = []
+
+    def request(self, method, url, headers=None, params=None, **kwargs):
+        self.requests.append((url, dict(params or {})))
+        return response(200, {}, url)
+
+
+@pytest.mark.parametrize("getter", sorted(endpoints.MISSING_END_IS_START))
+def test_missing_end_means_the_start_day(garmin, getter):
+    session = RecordingApi()
+    stub(garmin.client, "_api_session", session)
+    args = {"startdate": "2020-01-01"}
+    if getter == "get_device_solar_data":
+        args["device_id"] = "1"
+    # Some getters complain about the empty answer; only the request matters.
+    with contextlib.suppress(GarminConnectConnectionError):
+        getattr(garmin, getter)(**args)
+    # One request, about 2020-01-01 only: never extended to today.
+    assert len(session.requests) == 1
+    sent = json.dumps(session.requests)
+    assert "2020-01-01" in sent and date.today().isoformat() not in sent
+
+
+def test_missing_end_means_today_for_activities_by_date(garmin):
+    # Why the span check assumes "today" when a getter isn't listed: here a
+    # missing end leaves the range open, and Garmin pages through it.
+    session = RecordingApi()
+    stub(garmin.client, "_api_session", session)
+    garmin.get_activities_by_date("2020-01-01")
+    url, params = session.requests[0]
+    assert params.get("startDate") == "2020-01-01" and "endDate" not in params

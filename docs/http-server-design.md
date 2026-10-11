@@ -79,7 +79,9 @@ Connecting a client:
      The second POST calls `resume_login(state, code)`. After a wrong code
      Garmin keeps the step open, so the form is shown again with the error
      (each wrong code counts toward the failure limit); if Garmin has closed
-     the step, the owner starts over. One code at a time is checked per
+     the step, the owner starts over. If Garmin couldn't be reached while
+     checking the code, the owner is told so, it isn't counted as a failed
+     attempt, and the same code can simply be sent again. One code at a time is checked per
      step, and expiry is checked again when a waiting submission's turn
      comes. A repeat of the same wrong code is replayed rather than sent
      again, but after a temporary failure (Garmin unreachable or

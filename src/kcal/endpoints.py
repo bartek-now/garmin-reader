@@ -46,6 +46,14 @@ MAX_RESULT_CHARS = 50_000
 MAX_RANGE_DAYS = 366
 # (start, end) parameter names garminconnect uses for date ranges.
 _RANGE_PARAMS = (("start", "end"), ("startdate", "enddate"), ("fromdate", "todate"))
+# Getters for which a missing end means the start day alone (they set
+# end = start). For any other getter a missing end is assumed to mean today,
+# which is right for get_activities_by_date and the safe guess for a getter
+# not reviewed yet. tests/test_garmin_library.py checks this list.
+MISSING_END_IS_START = frozenset({
+    "get_blood_pressure", "get_body_battery", "get_body_composition",
+    "get_device_solar_data", "get_endurance_score", "get_hill_score",
+})
 # Lists longer than this are intraday series (per-minute movement, HRV
 # readings, ...); the default day summary drops them and keeps scalars.
 SUMMARY_MAX_LIST = 20
@@ -161,8 +169,9 @@ def call_endpoint(
 def _check_span(endpoint: str, fn, arguments: dict) -> None:
     """Refuse a date range longer than MAX_RANGE_DAYS. Only getters with both
     halves of a pair count: a lone `start` is a paging offset (get_goals,
-    get_workouts, ...). A missing end means today, as for the getters that
-    default it ("from 1900" is the whole history).
+    get_workouts, ...). A missing end means the start day for the getters in
+    MISSING_END_IS_START, and today for the rest ("from 1900" with no end is
+    the whole history for get_activities_by_date).
     """
     params = inspect.signature(fn).parameters
     for start_name, end_name in _RANGE_PARAMS:
@@ -172,12 +181,16 @@ def _check_span(endpoint: str, fn, arguments: dict) -> None:
             continue  # optional range left out (e.g. get_race_predictions)
         start = _date_arg(endpoint, start_name, arguments[start_name])
         end_value = arguments.get(end_name)
-        end = _date_arg(endpoint, end_name, end_value) if end_value else date.today()
+        if end_value:
+            end = _date_arg(endpoint, end_name, end_value)
+        else:
+            end = start if endpoint in MISSING_END_IS_START else date.today()
         days = (end - start).days + 1
         if days > MAX_RANGE_DAYS:
             raise ValueError(
                 f"{endpoint}: the range is {days} days; at most {MAX_RANGE_DAYS} can be "
-                "requested at once. Split it into smaller ranges."
+                f"requested at once. Split it into smaller ranges (for one day, give "
+                f"{end_name} the same date as {start_name})."
             )
 
 
