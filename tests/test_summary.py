@@ -67,27 +67,30 @@ class FakeGarmin:
             {"name": "Eye Mask"},
         ]}
 
+    def get_hrv_data_range(self, start, end):
+        self._record("hrv_range", start, end)
+        return {"hrvSummaries": [{
+            "calendarDate": str(D3), "lastNightAvg": 41, "lastNight5MinHigh": 66,
+            "weeklyAvg": 39, "baseline": {"balancedLow": 41, "balancedUpper": 52},
+            "status": "UNBALANCED",
+        }]}
+
+    def get_sleep_daily(self, start, end):
+        self._record("sleep_daily", start, end)
+        return [{
+            "calendarDate": str(D3), "values": {
+                "sleepScore": 71, "sleepScoreQuality": "FAIR",
+                "localSleepStartTimeInMillis": local_millis(f"{D2}T23:39"),
+                "localSleepEndTimeInMillis": local_millis(f"{D3}T07:22"),
+                "totalSleepTimeInSeconds": 19560, "deepTime": 7620, "lightTime": 9120,
+                "remTime": 2820, "awakeTime": 1020, "avgHeartRate": 51.4,
+                "respiration": 14.23, "spO2": 97.84, "bodyBatteryChange": 43,
+                "sleepNeed": 460,
+            },
+        }] if start <= str(D3) <= end else []
+
     def connectapi(self, path):
         self._record("connectapi", path)
-        start, end = path.rsplit("/", 2)[-2:]
-        if path.startswith("/hrv-service/"):
-            return {"hrvSummaries": [{
-                "calendarDate": str(D3), "lastNightAvg": 41, "lastNight5MinHigh": 66,
-                "weeklyAvg": 39, "baseline": {"balancedLow": 41, "balancedUpper": 52},
-                "status": "UNBALANCED",
-            }]}
-        if path.startswith("/sleep-service/"):
-            return {"individualStats": [{
-                "calendarDate": str(D3), "values": {
-                    "sleepScore": 71, "sleepScoreQuality": "FAIR",
-                    "localSleepStartTimeInMillis": local_millis(f"{D2}T23:39"),
-                    "localSleepEndTimeInMillis": local_millis(f"{D3}T07:22"),
-                    "totalSleepTimeInSeconds": 19560, "deepTime": 7620, "lightTime": 9120,
-                    "remTime": 2820, "awakeTime": 1020, "avgHeartRate": 51.4,
-                    "respiration": 14.23, "spO2": 97.84, "bodyBatteryChange": 43,
-                    "sleepNeed": 460,
-                },
-            }]} if start <= str(D3) <= end else {"individualStats": []}
         if path.startswith("/metrics-service/"):
             return [
                 {"calendarDate": str(D3), "inputContext": "AFTER_POST_EXERCISE_RESET",
@@ -222,23 +225,20 @@ def test_every_group_field_is_produced_and_documented(api):
 
 def test_only_needed_sources_are_fetched(api):
     table(api, ["hrv"])
-    assert api.calls == [("connectapi", f"/hrv-service/hrv/daily/{D1}/{D3}")]
+    assert api.calls == [("hrv_range", str(D1), str(D3))]
 
 
 def test_range_groups_cost_one_request(api):
     table(api, ["weight", "workouts", "hrv", "readiness"])
-    assert sorted(c[0] for c in api.calls) == ["activities", "connectapi", "connectapi", "weigh_ins"]
+    assert sorted(c[0] for c in api.calls) == ["activities", "connectapi", "hrv_range", "weigh_ins"]
 
 
-def test_sleep_is_fetched_in_28_day_chunks(api):
+def test_sleep_asks_for_the_whole_range_at_once(api):
+    # garminconnect's get_sleep_daily does the 28-day chunking
+    # (tests/test_garmin_library.py checks it with the real client).
     days = [D1 + timedelta(days=i) for i in range(60)]
     summary.summarize(api, days, ["sleep"])
-    paths = [c[1] for c in api.calls]
-    assert paths == [
-        f"/sleep-service/stats/sleep/daily/{days[0]}/{days[27]}",
-        f"/sleep-service/stats/sleep/daily/{days[28]}/{days[55]}",
-        f"/sleep-service/stats/sleep/daily/{days[56]}/{days[59]}",
-    ]
+    assert api.calls == [("sleep_daily", str(days[0]), str(days[-1]))]
 
 
 def test_per_day_groups_share_one_request_per_day(api):
@@ -294,11 +294,14 @@ def test_per_day_groups_limit_the_range(api):
 
 
 def test_range_endpoint_paths():
-    ok = [f"/hrv-service/hrv/daily/{D1}/{D3}", f"/sleep-service/stats/sleep/daily/{D1}/{D3}",
-          f"/metrics-service/metrics/trainingreadiness/{D1}/{D3}"]
-    bad = ["/userprofile-service/socialProfile", f"/hrv-service/hrv/daily/{D1}/{D3}/../x",
-           f"/hrv-service/hrv/daily/{D1}", f"/hrv-service/hrv/daily/{D1}/{D3}?x=1",
-           f"//hrv-service/hrv/daily/{D1}/{D3}"]
+    # Only readiness is still a raw path; HRV and sleep have getters now.
+    ok = [f"/metrics-service/metrics/trainingreadiness/{D1}/{D3}"]
+    bad = ["/userprofile-service/socialProfile",
+           f"/metrics-service/metrics/trainingreadiness/{D1}/{D3}/../x",
+           f"/metrics-service/metrics/trainingreadiness/{D1}",
+           f"/metrics-service/metrics/trainingreadiness/{D1}/{D3}?x=1",
+           f"//metrics-service/metrics/trainingreadiness/{D1}/{D3}",
+           f"/hrv-service/hrv/daily/{D1}/{D3}", f"/sleep-service/stats/sleep/daily/{D1}/{D3}"]
     assert all(summary.RANGE_PATHS.fullmatch(p) for p in ok)
     assert not any(summary.RANGE_PATHS.fullmatch(p) for p in bad)
 
@@ -316,14 +319,10 @@ def test_days_without_data_are_not_zeros(api):
 
 @pytest.mark.parametrize("error", [RuntimeError, GarminConnectConnectionError])
 def test_failing_group_reports_its_error_and_others_still_come_back(api, error):
-    original = api.connectapi
+    def no_hrv(start, end):
+        raise error("404 no HRV on this watch")
 
-    def no_hrv(path):
-        if path.startswith("/hrv-service/"):
-            raise error("404 no HRV on this watch")
-        return original(path)
-
-    api.connectapi = no_hrv
+    api.get_hrv_data_range = no_hrv
     out = summary.summarize(api, [D1, D2, D3], ["weight", "hrv", "sleep"])
     assert out["errors"] == {"hrv": f"{error.__name__}: 404 no HRV on this watch"}
     assert "weight_kg" in out["fields"] and "sleep_score" in out["fields"]
@@ -364,10 +363,10 @@ def test_login_problems_still_fail_the_whole_call(api, error):
 
     exc = GarminLoginError("expired") if error == "login" else GarminConnectAuthenticationError("401")
 
-    def fail(path):
+    def fail(start, end):
         raise exc
 
-    api.connectapi = fail
+    api.get_hrv_data_range = fail
     with pytest.raises(type(exc)):
         summary.summarize(api, [D1, D2, D3], ["weight", "hrv"])
 
@@ -392,7 +391,8 @@ def test_a_failed_day_stops_the_rest(api):
 
 
 @pytest.mark.parametrize("method, groups", [
-    ("connectapi", ["hrv", "sleep"]),
+    ("get_hrv_data_range", ["hrv", "sleep"]),
+    ("connectapi", ["readiness", "heart"]),  # per-day groups come after readiness
     ("get_user_summary", ["heart", "stress", "lifestyle"]),
     ("get_lifestyle_logging_data", ["lifestyle"]),
 ])

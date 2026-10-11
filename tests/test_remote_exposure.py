@@ -292,17 +292,16 @@ def test_call_endpoint_reports_login_failure(failing_login, remote):
 # --- the range endpoints get_garmin_summary uses ---------------------------------------
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/hrv-service/hrv/daily/2026-10-01/2026-10-08",
-        "/sleep-service/stats/sleep/daily/2026-10-01/2026-10-08",
-        "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08",
-    ],
-)
-def test_range_endpoints_reachable_remotely(api, path):
-    mcp_server._Garmin().connectapi(path)  # default exposure is the remote one
+def test_readiness_range_path_reachable_remotely(api):
+    # The one raw path left: readiness has no garminconnect range getter.
+    mcp_server._Garmin().connectapi("/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08")
     assert api.calls == ["connectapi"]
+
+
+@pytest.mark.parametrize("getter", ["get_hrv_data_range", "get_sleep_daily"])
+def test_range_getters_reachable_remotely(api, getter):
+    getattr(mcp_server._Garmin(), getter)("2026-10-01", "2026-10-08")
+    assert api.calls == [getter]
 
 
 @pytest.mark.parametrize(
@@ -310,8 +309,11 @@ def test_range_endpoints_reachable_remotely(api, path):
     [
         "/userprofile-service/socialProfile",
         "/activity-service/activity/1/details",
-        "/hrv-service/hrv/daily/2026-10-01/2026-10-08/../../../userprofile-service/socialProfile",
-        "/hrv-service/hrv/daily/2026-10-01/2026-10-08?x=1",
+        "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08/../../../userprofile-service/socialProfile",
+        "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08?x=1",
+        # Reached through their getters now, so no longer as raw paths.
+        "/hrv-service/hrv/daily/2026-10-01/2026-10-08",
+        "/sleep-service/stats/sleep/daily/2026-10-01/2026-10-08",
     ],
 )
 def test_other_raw_paths_blocked_remotely(api, path):
@@ -322,15 +324,17 @@ def test_other_raw_paths_blocked_remotely(api, path):
 
 def test_raw_path_extra_arguments_blocked_remotely(api):
     with pytest.raises(ValueError, match="not available remotely"):
-        mcp_server._Garmin().connectapi("/hrv-service/hrv/daily/2026-10-01/2026-10-08", method="POST")
+        mcp_server._Garmin().connectapi(
+            "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08", method="POST"
+        )
 
 
 def test_summary_works_remotely_and_strips_nothing_it_needs(api, remote, monkeypatch):
-    def connectapi(path):
-        api.calls.append("connectapi")
+    def get_hrv_data_range(start, end):
+        api.calls.append("get_hrv_data_range")
         return {"hrvSummaries": [{"calendarDate": "2026-10-05", "lastNightAvg": 41}]}
 
-    monkeypatch.setattr(api, "connectapi", connectapi, raising=False)
+    monkeypatch.setattr(api, "get_hrv_data_range", get_hrv_data_range, raising=False)
     out = call(remote, "get_garmin_summary", {"date": "2026-10-05", "metrics": ["hrv"]})
     assert out == {"fields": ["date", "hrv_last_night_ms"], "days": [["2026-10-05", 41]]}
 
@@ -345,3 +349,11 @@ def test_remote_day_enum_lists_only_allowlisted_metrics(remote, monkeypatch):
         "hrv_data", "sleep_data",
     ]
     assert "- sleep_data:" in day.description and "- stress_data:" not in day.description
+
+
+def test_long_range_refused_remotely_before_any_request(api, remote):
+    with pytest.raises(ToolError, match="at most 366"):
+        call(remote, "call_garmin_endpoint", {
+            "endpoint": "get_sleep_daily", "args": {"start": "1900-01-01", "end": "2026-10-01"},
+        })
+    assert api.calls == []

@@ -25,6 +25,7 @@ Garmin. Three layers make sure of that:
 """
 
 import asyncio
+import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import ipaddress
 import json
@@ -33,6 +34,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import date, timedelta
 
 import pytest
 import requests
@@ -44,7 +46,7 @@ from garminconnect import (
 )
 from mcp.server.fastmcp.exceptions import ToolError
 
-from kcal import mcp_server
+from kcal import endpoints, mcp_server
 from kcal.auth import GarminRefreshUnavailable, _guard_token_refresh
 from kcal.oauth import KcalOAuthProvider
 from kcal.settings import HttpSettings
@@ -505,3 +507,293 @@ def test_upstream_cached_login_still_needs_fallback_guard(
     assert type(garmin.client.kcal_refresh_error) is (
         GarminConnectTooManyRequestsError if failure == 429 else GarminRefreshUnavailable
     )
+
+
+# --- the range getters get_garmin_summary relies on --------------------------------
+
+
+def sleep_score(night: date) -> int:
+    """A score unique to each night of the test ranges."""
+    return night.timetuple().tm_yday
+
+
+class FakeRangeApi:
+    """Answers Garmin's range endpoints by path, recording each path asked."""
+
+    def __init__(self):
+        self.paths = []
+
+    def request(self, method, url, headers=None, **kwargs):
+        path = "/" + url.split("://", 1)[1].split("/", 1)[1]
+        self.paths.append(path)
+        if path.startswith("/sleep-service/stats/sleep/daily/"):
+            start, end = (date.fromisoformat(d) for d in path.rsplit("/", 2)[-2:])
+            nights = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+            # Every night of the chunk, each with its own score, plus the
+            # chunk's first night again: merging must de-duplicate.
+            body = {"individualStats": [
+                {"calendarDate": d.isoformat(), "values": {"sleepScore": sleep_score(d)}}
+                for d in nights + nights[:1]
+            ]}
+            return response(200, body, url)
+        if path.startswith("/hrv-service/hrv/daily/"):
+            return response(200, {"hrvSummaries": [{"calendarDate": "2026-09-29", "lastNightAvg": 41}]}, url)
+        return response(404, {}, url)
+
+
+def test_sleep_daily_chunks_28_days_and_merges(garmin):
+    session = FakeRangeApi()
+    stub(garmin.client, "_api_session", session)
+    nights = garmin.get_sleep_daily("2026-08-01", "2026-09-29")  # 60 days
+    assert session.paths == [
+        "/sleep-service/stats/sleep/daily/2026-08-01/2026-08-28",
+        "/sleep-service/stats/sleep/daily/2026-08-29/2026-09-25",
+        "/sleep-service/stats/sleep/daily/2026-09-26/2026-09-29",
+    ]
+    # Every night of every chunk, once, oldest first, each with its own score.
+    expected = [date(2026, 8, 1) + timedelta(days=i) for i in range(60)]
+    assert [n["calendarDate"] for n in nights] == [d.isoformat() for d in expected]
+    assert [n["values"]["sleepScore"] for n in nights] == [sleep_score(d) for d in expected]
+
+
+def test_hrv_data_range_is_one_request_returning_summaries(garmin):
+    session = FakeRangeApi()
+    stub(garmin.client, "_api_session", session)
+    out = garmin.get_hrv_data_range("2025-10-01", "2026-09-30")
+    assert session.paths == ["/hrv-service/hrv/daily/2025-10-01/2026-09-30"]
+    assert out["hrvSummaries"][0]["lastNightAvg"] == 41
+
+
+def test_summary_reads_the_real_getters_output(garmin):
+    from kcal import summary
+
+    stub(garmin.client, "_api_session", FakeRangeApi())
+    days = [date(2026, 8, 1) + timedelta(days=i) for i in range(60)]
+    out = summary.summarize(garmin, days, ["sleep", "hrv"])
+    fields, rows = out["fields"], {r[0]: dict(zip(out["fields"], r)) for r in out["days"]}
+    assert "errors" not in out
+    # Every night, including both sides of each 28-day chunk boundary.
+    assert {day: row["sleep_score"] for day, row in rows.items()} == {
+        d.isoformat(): sleep_score(d) for d in days
+    }
+    assert rows["2026-09-29"]["hrv_last_night_ms"] == 41
+    assert {"sleep_score", "hrv_last_night_ms"} <= set(fields)
+
+
+# --- the verification step the login page lets the owner retry --------------------
+#
+# Only Garmin's MFA verify endpoints are faked: the real _complete_mfa decides
+# what each answer means and the real resume_login decides what happens to
+# the step, which is what GarminGateway.mfa_pending() then reports.
+
+
+class FakeSSO:
+    """Garmin's MFA verify endpoints: each POST gets the next answer."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.codes = []
+
+    def post(self, url, params=None, headers=None, json=None, data=None, timeout=None):
+        # Portal and mobile send the code as JSON, the widget as a form.
+        self.codes.append(json["mfaVerificationCode"] if json else data["mfa-code"])
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, requests.Response):
+            return answer
+        status, body = answer
+        return response(status, body, url)
+
+
+WRONG = (200, {"responseStatus": {"type": "INVALID_MFA_CODE"}})
+LIMITED = (429, {})
+ACCEPTED = (200, {"responseStatus": {"type": "SUCCESSFUL"}, "serviceTicketId": "ST-1"})
+
+
+def awaiting_code(garmin, answers):
+    """The client as a password login that needs a code leaves it (portal
+    flow). Those attributes are created by that login, not in __init__, so
+    stub() can't check them; if _complete_mfa stops reading them, these
+    tests fail instead.
+    """
+    client = garmin.client
+    stub(client, "_mfa_pending", True)
+    sso = FakeSSO(answers)
+    client._mfa_session, client._mfa_flow, client._mfa_method = sso, "portal", "email"
+    client._mfa_login_params, client._mfa_post_headers = {}, {}
+    return sso
+
+
+def test_wrong_mfa_code_leaves_the_step_open(garmin):
+    from kcal.login_page import GarminGateway
+
+    sso = awaiting_code(garmin, [WRONG, WRONG])
+    with pytest.raises(GarminConnectAuthenticationError):
+        garmin.resume_login(None, "000000")
+    assert sso.codes == ["000000", "000000"]  # both verify endpoints asked
+    assert GarminGateway().mfa_pending(garmin)  # so /login offers the code form again
+
+
+def test_rate_limited_mfa_code_leaves_the_step_open(garmin):
+    from kcal.login_page import GarminGateway
+
+    awaiting_code(garmin, [LIMITED, LIMITED])
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        garmin.resume_login(None, "123456")
+    assert GarminGateway().mfa_pending(garmin)
+
+
+def page(status: int, text: str) -> requests.Response:
+    """A response whose body is `text` as is (HTML, or broken JSON)."""
+    r = response(status, None)
+    r._content = text.encode()
+    return r
+
+
+TIMEOUT = requests.exceptions.ReadTimeout("Read timed out")
+SERVER_ERROR = (503, {"error": {"status-code": "503"}})  # JSON, but no answer
+JSON_LIMITED = (200, {"error": {"status-code": "429"}})  # a 200 saying "rate limited"
+BOT_CHECK = "bot-check"  # a non-JSON page instead of an answer
+
+
+def portal_answers(answers):
+    return [page(403, "<html>Just a moment...</html>") if a == BOT_CHECK else a for a in answers]
+
+
+@pytest.mark.parametrize("answers", [
+    [TIMEOUT, TIMEOUT],
+    [SERVER_ERROR, SERVER_ERROR],
+    [BOT_CHECK, BOT_CHECK],
+    [SERVER_ERROR, TIMEOUT],
+    [LIMITED, TIMEOUT],
+    [JSON_LIMITED, TIMEOUT],
+    [TIMEOUT, JSON_LIMITED],
+    [(200, {"error": {"status-code": "503"}}), BOT_CHECK],
+])
+def test_portal_code_check_that_got_no_answer_is_unavailable(garmin, answers):
+    # garminconnect raises the same authentication error for these as for a
+    # wrong code; GarminGateway.finish tells them apart by watching answers.
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    sso = awaiting_code(garmin, portal_answers(answers))
+    with pytest.raises(GarminVerificationUnavailable):
+        GarminGateway().finish(garmin, "123456")
+    assert GarminGateway().mfa_pending(garmin)  # the step is still open
+    assert garmin.client._mfa_session is sso  # and its session is restored
+
+
+@pytest.mark.parametrize("answers", [
+    [WRONG, TIMEOUT], [TIMEOUT, WRONG], [WRONG, WRONG],
+    [WRONG, JSON_LIMITED],  # one real answer is enough
+    [(200, {"error": {"status-code": "401"}}), TIMEOUT],  # a 4xx decision is an answer
+])
+def test_portal_wrong_code_is_still_a_wrong_code(garmin, answers):
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    awaiting_code(garmin, answers)
+    with pytest.raises(GarminConnectAuthenticationError) as err:
+        GarminGateway().finish(garmin, "000000")
+    assert not isinstance(err.value, GarminVerificationUnavailable)
+
+
+@pytest.mark.parametrize("answers", [[LIMITED, LIMITED], [JSON_LIMITED, JSON_LIMITED], [LIMITED, JSON_LIMITED]])
+def test_portal_rate_limit_passes_through(garmin, answers):
+    from kcal.login_page import GarminGateway
+
+    awaiting_code(garmin, answers)
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        GarminGateway().finish(garmin, "123456")
+
+
+def awaiting_widget_code(garmin, answers):
+    """The client as a widget-flow login that needs a code leaves it."""
+    sso = awaiting_code(garmin, answers)
+    garmin.client._mfa_flow = "widget"
+    garmin.client._widget_last_resp = page(200, '<input name="_csrf" value="token-1"/>')
+    return sso
+
+
+@pytest.mark.parametrize("answer", [TIMEOUT, (503, {}), (500, {})])
+def test_widget_code_check_that_got_no_answer_is_unavailable(garmin, answer):
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    awaiting_widget_code(garmin, [answer if answer is TIMEOUT else page(answer[0], "<html>Error</html>")])
+    with pytest.raises(GarminVerificationUnavailable):
+        GarminGateway().finish(garmin, "123456")
+    assert GarminGateway().mfa_pending(garmin)
+
+
+def test_widget_wrong_code_is_still_a_wrong_code(garmin):
+    # The widget answers in HTML: a page that isn't "Success" is an answer.
+    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+
+    awaiting_widget_code(garmin, [page(200, "<html><title>Enter MFA code</title></html>")])
+    with pytest.raises(GarminConnectAuthenticationError) as err:
+        GarminGateway().finish(garmin, "000000")
+    assert not isinstance(err.value, GarminVerificationUnavailable)
+
+
+def test_widget_rate_limit_passes_through(garmin):
+    from kcal.login_page import GarminGateway
+
+    awaiting_widget_code(garmin, [page(429, "")])
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        GarminGateway().finish(garmin, "123456")
+
+
+def test_corrected_code_signs_in_and_closes_the_step(garmin):
+    from kcal.login_page import GarminGateway
+
+    sso = awaiting_code(garmin, [WRONG, WRONG, ACCEPTED])
+    with pytest.raises(GarminConnectAuthenticationError):
+        garmin.resume_login(None, "000000")
+    tickets = []
+    # What follows an accepted code reaches Garmin's servers: faked too.
+    stub(garmin.client, "_establish_session",
+         lambda ticket, sess=None, service_url=None: tickets.append(ticket))
+    stub(garmin.client, "_verify_token", lambda: True)
+    stub(garmin, "_load_profile_and_settings", lambda: None)
+    garmin.resume_login(None, "123456")
+    assert tickets == ["ST-1"] and sso.codes[-1] == "123456"
+    assert not GarminGateway().mfa_pending(garmin)
+
+
+# --- what a missing end date means (endpoints.MISSING_END_IS_START) ----------------
+
+
+class RecordingApi:
+    """Records each API request's path and query; answers with nothing."""
+
+    def __init__(self):
+        self.requests = []
+
+    def request(self, method, url, headers=None, params=None, **kwargs):
+        self.requests.append((url, dict(params or {})))
+        return response(200, {}, url)
+
+
+@pytest.mark.parametrize("getter", sorted(endpoints.MISSING_END_IS_START))
+def test_missing_end_means_the_start_day(garmin, getter):
+    session = RecordingApi()
+    stub(garmin.client, "_api_session", session)
+    args = {"startdate": "2020-01-01"}
+    if getter == "get_device_solar_data":
+        args["device_id"] = "1"
+    # Some getters complain about the empty answer; only the request matters.
+    with contextlib.suppress(GarminConnectConnectionError):
+        getattr(garmin, getter)(**args)
+    # One request, about 2020-01-01 only: never extended to today.
+    assert len(session.requests) == 1
+    sent = json.dumps(session.requests)
+    assert "2020-01-01" in sent and date.today().isoformat() not in sent
+
+
+def test_missing_end_means_today_for_activities_by_date(garmin):
+    # Why the span check assumes "today" when a getter isn't listed: here a
+    # missing end leaves the range open, and Garmin pages through it.
+    session = RecordingApi()
+    stub(garmin.client, "_api_session", session)
+    garmin.get_activities_by_date("2020-01-01")
+    url, params = session.requests[0]
+    assert params.get("startDate") == "2020-01-01" and "endDate" not in params

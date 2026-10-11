@@ -91,7 +91,7 @@ def test_summary_description_documents_every_group():
 
 def test_summary_through_mcp(monkeypatch):
     class Api:
-        def connectapi(self, path):
+        def get_hrv_data_range(self, start, end):
             return {"hrvSummaries": [{"calendarDate": "2026-10-05", "lastNightAvg": 41}]}
 
     monkeypatch.setattr(mcp_server, "_api", Api())

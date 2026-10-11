@@ -161,3 +161,76 @@ def test_total_cap_counts_date_and_key_in_solo_size():
     # The value alone fits in 300 chars, but {"date":..., "a": value} doesn't.
     out = endpoints._fit_total({"date": "2026-10-05", "a": "x" * 280, "b": 1}, limit=300)
     assert "too large to return even on its own" in str(out)
+
+
+# --- date-range span ----------------------------------------------------------------
+
+
+class Recorder:
+    """Records each getter called; returns an empty result."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        def getter(*args, **kwargs):
+            self.calls.append(name)
+            return {}
+        return getter
+
+
+def test_long_range_refused_before_any_request():
+    # get_sleep_daily makes one request per 28 days: 1900-2026 would be
+    # over 1,600 requests before the result-size cap could apply.
+    api = Recorder()
+    with pytest.raises(ValueError, match="at most 366"):
+        endpoints.call_endpoint(api, "get_sleep_daily", {"start": "1900-01-01", "end": "2026-10-01"})
+    assert api.calls == []
+
+
+def test_a_year_is_allowed():
+    api = Recorder()
+    endpoints.call_endpoint(api, "get_sleep_daily", {"start": "2025-10-01", "end": "2026-10-01"})
+    assert api.calls == ["get_sleep_daily"]
+
+
+def test_missing_end_means_today():
+    from datetime import date, timedelta
+
+    api = Recorder()
+    with pytest.raises(ValueError, match="at most 366"):
+        endpoints.call_endpoint(api, "get_activities_by_date", {"startdate": "1900-01-01"})
+    recent = (date.today() - timedelta(days=30)).isoformat()
+    endpoints.call_endpoint(api, "get_activities_by_date", {"startdate": recent})
+    assert api.calls == ["get_activities_by_date"]
+
+
+@pytest.mark.parametrize("endpoint, args", [
+    ("get_workouts", {"start": 0, "limit": 10}),  # paging offsets, not dates
+    ("get_goals", {"start": "1"}),
+    ("get_race_predictions", {}),  # optional range left out
+])
+def test_non_date_starts_are_not_ranges(endpoint, args):
+    api = Recorder()
+    endpoints.call_endpoint(api, endpoint, args)
+    assert api.calls == [endpoint]
+
+
+def test_range_dates_must_be_dates():
+    api = Recorder()
+    with pytest.raises(ValueError, match="start must be a date"):
+        endpoints.call_endpoint(api, "get_sleep_daily", {"start": "last year", "end": "2026-10-01"})
+    assert api.calls == []
+
+
+@pytest.mark.parametrize("endpoint", sorted(endpoints.MISSING_END_IS_START))
+def test_old_single_day_allowed_where_missing_end_means_that_day(endpoint):
+    api = Recorder()
+    endpoints.call_endpoint(api, endpoint, {"startdate": "2020-01-01"} if endpoint != "get_device_solar_data"
+                            else {"device_id": "1", "startdate": "2020-01-01"})
+    assert api.calls == [endpoint]
+
+
+def test_span_error_explains_how_to_ask_for_one_day():
+    with pytest.raises(ValueError, match="give enddate the same date as startdate"):
+        endpoints.call_endpoint(Recorder(), "get_activities_by_date", {"startdate": "2020-01-01"})

@@ -100,8 +100,10 @@ the private hooks and library behavior kcal depends on, and the checks to run.
   parameters.
 - `call_garmin_endpoint` (`endpoint`, `args`): call any of those endpoints,
   e.g. `get_sleep_data` with `{"cdate": "2026-10-05"}`. Only `get_*` methods
-  are reachable, so nothing can write or delete. Results over ~50k chars are
-  replaced by a notice asking for a narrower request.
+  are reachable, so nothing can write or delete. Date ranges are limited to
+  366 days (checked before Garmin is asked, since some range endpoints make
+  a request per few weeks), and results over ~50k chars are replaced by a
+  notice asking for a narrower request.
 - `get_kcal_server_info`: which code the running server loaded and whether
   it's stale (code on disk changed since it started).
 

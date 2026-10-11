@@ -38,6 +38,10 @@ class FakeGarmin:
     def __init__(self):
         self.calls = []
         self.error = None  # raised by start() if set
+        # Like garminconnect 0.3.17, a wrong code leaves the step open;
+        # set to True to model Garmin closing it instead.
+        self.wrong_code_closes_step = False
+        self.finish_failures = []  # raised (in order) before a code is checked
 
     def start(self, email, password):
         self.calls.append(("start", email))
@@ -46,14 +50,22 @@ class FakeGarmin:
         account = self.accounts.get(email)
         if account is None or account[0] != password:
             raise GarminConnectAuthenticationError("401 Unauthorized")
-        session = {"email": email, "profile": account[1], "mfa": account[2], "done": not account[2]}
+        session = {"email": email, "profile": account[1], "mfa": account[2],
+                   "done": not account[2], "mfa_open": account[2] is not None}
         return session, account[2] is not None
 
     def finish(self, session, code):
         self.calls.append(("finish", code))
+        if self.finish_failures:
+            raise self.finish_failures.pop(0)
         if code != session["mfa"]:
+            if self.wrong_code_closes_step:
+                session["mfa_open"] = False
             raise GarminConnectAuthenticationError("bad MFA code")
-        session["done"] = True
+        session["done"], session["mfa_open"] = True, False
+
+    def mfa_pending(self, session):
+        return session["mfa_open"]
 
     def profile_id(self, session):
         assert session["done"]
@@ -217,18 +229,110 @@ def test_mfa_sign_in(client, garmin):
     assert r.status_code == 303 and r.headers["location"].startswith(REDIRECT)
 
 
-def test_wrong_mfa_code_starts_over(client, garmin):
+def submit_code(client, flow, code, req=""):
+    return client.post("/login", data={
+        "csrf": client.cookies.get(login_page.CSRF_COOKIE), "flow": flow, "req": req,
+        "code": code, "action": "mfa",
+    }, follow_redirects=False)
+
+
+def test_wrong_mfa_code_can_be_corrected(client, garmin):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    r = submit_code(client, flow, "000000", req)
+    # Garmin kept the step open: the same code form again, with the error.
+    assert "Garmin didn't accept that code" in r.text and flow_id(r.text) == flow
+    r = submit_code(client, flow, "123456", req)
+    assert r.status_code == 303 and r.headers["location"].startswith(REDIRECT)
+    assert [c for c in garmin.calls if c[0] == "finish"] == [
+        ("finish", "000000"), ("finish", "123456"),
+    ]
+
+
+def test_wrong_code_starts_over_if_garmin_closed_the_step(client, garmin):
+    garmin.wrong_code_closes_step = True
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    r = submit_code(client, flow, "000000", req)
+    assert "didn't accept" in r.text and 'name="password"' in r.text  # the sign-in form
+    r = submit_code(client, flow, "123456", req)
+    assert r.status_code == 400 and "Sign-in expired" in r.text
+    assert [c for c in garmin.calls if c[0] == "finish"] == [("finish", "000000")]
+
+
+def test_repeated_wrong_code_is_replayed_not_resent(client, garmin):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    first, second = submit_code(client, flow, "000000", req), submit_code(client, flow, "000000", req)
+    assert first.text == second.text
+    assert [c for c in garmin.calls if c[0] == "finish"] == [("finish", "000000")]
+
+
+def test_wrong_codes_count_toward_the_limit(client, garmin):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    for i in range(login_page.MAX_FAILURES):
+        submit_code(client, flow, f"00000{i}", req)
+    r = submit_code(client, flow, "123456", req)
+    assert r.status_code == 429  # paused, though the step is still open
+    assert ("finish", "123456") not in garmin.calls
+
+
+def test_code_after_success_gets_the_same_redirect(client, garmin):
+    # Two submissions with different codes (a correction typed while the
+    # first was being checked): the browser shows the second response.
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    good = submit_code(client, flow, "123456", req)
+    late = submit_code(client, flow, "999999", req)
+    assert late.status_code == 303 and late.headers["location"] == good.headers["location"]
+    assert ("finish", "999999") not in garmin.calls
+
+
+def test_code_form_offers_start_over(client, garmin):
     _, req = start_authorization(client)
     r = sign_in(client, req, email="mfa@example.com")
-    flow = flow_id(r.text)
-    csrf = client.cookies.get(login_page.CSRF_COOKIE)
-    r = client.post("/login", data={"csrf": csrf, "flow": flow, "code": "000000", "action": "mfa"})
-    assert "didn't accept" in r.text
-    # Garmin's MFA state is single use: submitting the flow again only shows
-    # the same answer, and Garmin isn't asked twice.
-    r = client.post("/login", data={"csrf": csrf, "flow": flow, "code": "123456", "action": "mfa"})
-    assert "didn't accept" in r.text
-    assert [c for c in garmin.calls if c[0] == "finish"] == [("finish", "000000")]
+    assert f'href="/login?req={req}">Start over' in r.text
+
+
+def test_different_codes_reach_garmin_one_at_a_time(garmin, provider, state):
+    import threading
+
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
+    running, overlaps = [], []
+    original = garmin.finish
+
+    def slow_finish(session, code):
+        running.append(code)
+        if len(running) > 1:
+            overlaps.append(code)
+        threading.Event().wait(0.2)
+        running.remove(code)
+        original(session, code)
+
+    garmin.finish = slow_finish
+
+    async def two_codes():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=PUBLIC,
+            cookies={login_page.CSRF_COOKIE: "t"},
+        ) as c:
+            r = await c.post("/login", data={"csrf": "t", "email": "mfa@example.com",
+                                             "password": PASSWORD, "action": "signin"})
+            flow = flow_id(r.text)
+            return await asyncio.gather(*(
+                c.post("/login", data={"csrf": "t", "flow": flow, "code": code, "action": "mfa"})
+                for code in ("000000", "123456")
+            ))
+
+    responses = asyncio.run(two_codes())
+    assert overlaps == []
+    assert any("Garmin session refreshed" in r.text for r in responses)
 
 
 def test_mfa_flow_expires(client, garmin, monkeypatch):
@@ -409,6 +513,7 @@ class ExpiredSession:
         raise GarminConnectAuthenticationError("401 Unauthorized")
 
     get_sleep_data = get_hrv_data = get_activities_by_date = connectapi = _rejected
+    get_hrv_data_range = get_sleep_daily = _rejected
 
     def get_user_summary(self, cdate):
         if cdate == self.FIRST_DAY:
@@ -884,3 +989,217 @@ def test_slow_owner_checks_still_reserve_attempt_slots(garmin, provider, state, 
             assert len([x for x in garmin.calls if x[0] == ("finish" if mfa else "start")]) == login_page.MAX_FAILURES
 
     asyncio.run(run())
+
+
+
+# --- retrying the code: review fixes --------------------------------------------------
+
+
+@pytest.mark.parametrize("failure", [
+    GarminConnectConnectionError("timeout"), GarminConnectTooManyRequestsError("429"),
+])
+def test_same_code_is_tried_again_after_a_temporary_failure(client, garmin, failure):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    garmin.finish_failures = [failure]
+    r = submit_code(client, flow, "123456", req)
+    assert flow_id(r.text) == flow  # the code form again
+    # Garmin has recovered: the very same code must reach it, not a replay.
+    r = submit_code(client, flow, "123456", req)
+    assert r.status_code == 303 and r.headers["location"].startswith(REDIRECT)
+    assert [c for c in garmin.calls if c[0] == "finish"] == [("finish", "123456")] * 2
+
+
+def test_success_beats_a_remembered_wrong_code(client, garmin):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    submit_code(client, flow, "000000", req)  # wrong: remembered
+    good = submit_code(client, flow, "123456", req)
+    again = submit_code(client, flow, "000000", req)  # e.g. a stale tab resubmitting
+    assert again.status_code == 303 and again.headers["location"] == good.headers["location"]
+    assert [c for c in garmin.calls if c[0] == "finish"] == [
+        ("finish", "000000"), ("finish", "123456"),
+    ]
+
+
+def test_code_queued_past_expiry_is_refused(garmin, provider, state, monkeypatch):
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=PUBLIC,
+            cookies={login_page.CSRF_COOKIE: "t"},
+        ) as c:
+            r = await c.post("/login", data={"csrf": "t", "email": "mfa@example.com",
+                                             "password": PASSWORD, "action": "signin"})
+            flow = flow_id(r.text)
+            step = page._mfa[flow]
+            await step.lock.acquire()  # another code is being checked
+            queued = asyncio.create_task(c.post("/login", data={
+                "csrf": "t", "flow": flow, "code": "123456", "action": "mfa"}))
+            await asyncio.sleep(0.2)  # the submission is now waiting for its turn
+            later = time.time() + login_page.MFA_SECONDS + 1
+            monkeypatch.setattr(login_page.time, "time", lambda: later)
+            step.lock.release()
+            return await queued
+
+    r = asyncio.run(scenario())
+    assert r.status_code == 400 and "Sign-in expired" in r.text
+    assert [c for c in garmin.calls if c[0] == "finish"] == []  # never reached Garmin
+    assert not (state / "garmin_tokens").exists()
+
+
+
+# --- Garmin unreachable during the code check; simultaneous retries ---------------------
+
+# What GarminGateway.finish raises when Garmin's code check didn't answer
+# (tests/test_garmin_library.py checks it against the real client).
+OUTAGE = login_page.GarminVerificationUnavailable("Garmin didn't answer the code check")
+
+
+def test_unreachable_verification_is_not_a_wrong_code(client, garmin):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    garmin.finish_failures = [OUTAGE]
+    r = submit_code(client, flow, "123456", req)
+    assert "Couldn't reach Garmin" in r.text and "didn't accept" not in r.text
+    r = submit_code(client, flow, "123456", req)  # Garmin is back
+    assert r.status_code == 303
+    assert [c for c in garmin.calls if c[0] == "finish"] == [("finish", "123456")] * 2
+
+
+def test_unreachable_verification_does_not_count_toward_the_limit(client, garmin):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    garmin.finish_failures = [OUTAGE] * (login_page.MAX_FAILURES + 1)
+    for _ in range(login_page.MAX_FAILURES + 1):
+        r = submit_code(client, flow, "123456", req)
+    assert r.status_code == 200 and "Couldn't reach Garmin" in r.text  # never paused
+
+
+def test_simultaneous_retries_after_a_temporary_failure(garmin, provider, state):
+    # Three identical submissions while the first hits a temporary failure:
+    # all get the first one's answer, Garmin is asked once, nothing crashes.
+    import threading
+
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
+    original = garmin.finish
+
+    def slow_failure(session, code):
+        threading.Event().wait(0.3)
+        garmin.finish = original
+        garmin.calls.append(("finish", code))
+        raise GarminConnectConnectionError("timeout")
+
+    async def three_at_once():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=PUBLIC,
+            cookies={login_page.CSRF_COOKIE: "t"},
+        ) as c:
+            r = await c.post("/login", data={"csrf": "t", "email": "mfa@example.com",
+                                             "password": PASSWORD, "action": "signin"})
+            flow = flow_id(r.text)
+            garmin.finish = slow_failure
+            data = {"csrf": "t", "flow": flow, "code": "123456", "action": "mfa"}
+            responses = await asyncio.gather(*(c.post("/login", data=data) for _ in range(3)))
+            later = await c.post("/login", data=data)  # after the failure: really tried
+            return responses, later
+
+    responses, later = asyncio.run(three_at_once())
+    assert [r.status_code for r in responses] == [200, 200, 200]
+    assert len({r.text for r in responses}) == 1 and "Couldn't reach Garmin" in responses[0].text
+    assert "Garmin session refreshed" in later.text
+    assert [c for c in garmin.calls if c[0] == "finish"] == [("finish", "123456")] * 2
+
+
+def test_replay_entries_are_only_removed_by_their_owner(garmin, provider, state):
+    # If the first submission crashes, the duplicates waiting on it each try
+    # for themselves; one finishing must not remove the other's entry.
+    from starlette.responses import HTMLResponse
+
+    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    runs = []
+
+    async def run():
+        runs.append(len(runs))
+        if runs[-1] == 0:
+            await asyncio.sleep(0.05)
+            raise RuntimeError("crashed")
+        await asyncio.sleep(0.1 * runs[-1])  # the second waiter finishes last
+        response = HTMLResponse("temporary failure")
+        response.kcal_replayable = False
+        return response
+
+    async def three():
+        return await asyncio.gather(
+            *(page._once("mfa:step:code", run) for _ in range(3)), return_exceptions=True
+        )
+
+    first, second, third = asyncio.run(three())
+    assert isinstance(first, RuntimeError)
+    assert second.status_code == third.status_code == 200  # no KeyError
+    assert page._submissions == {}
+
+
+
+def test_flow_removed_during_a_failing_check_is_not_a_crash(garmin, provider, state):
+    # While a code is being checked, another submission can remove the
+    # expired step; the failing check must still answer, not crash.
+    import threading
+
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    garmin.wrong_code_closes_step = True
+    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
+    checking, release = threading.Event(), threading.Event()
+    original = garmin.finish
+
+    def slow_finish(session, code):
+        checking.set()
+        release.wait(5)
+        original(session, code)
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=PUBLIC,
+            cookies={login_page.CSRF_COOKIE: "t"},
+        ) as c:
+            r = await c.post("/login", data={"csrf": "t", "email": "mfa@example.com",
+                                             "password": PASSWORD, "action": "signin"})
+            flow = flow_id(r.text)
+            garmin.finish = slow_finish
+            pending = asyncio.create_task(c.post("/login", data={
+                "csrf": "t", "flow": flow, "code": "000000", "action": "mfa"}))
+            while not checking.is_set():
+                await asyncio.sleep(0.01)
+            page._mfa.pop(flow)  # removed meanwhile, as an expiry sweep does
+            release.set()
+            return await pending
+
+    r = asyncio.run(scenario())
+    assert r.status_code == 200 and "didn't accept" in r.text and 'name="password"' in r.text
+
+
+def test_finished_step_is_not_replayed_after_it_expires(client, garmin, monkeypatch):
+    _, req = start_authorization(client)
+    flow = flow_id(sign_in(client, req, email="mfa@example.com").text)
+    assert submit_code(client, flow, "123456", req).status_code == 303
+    later = time.time() + login_page.MFA_SECONDS + 1
+    monkeypatch.setattr(login_page.time, "time", lambda: later)
+    # An old tab resubmitting much later: no stale redirect, an expiry page.
+    for code in ("123456", "999999"):
+        r = submit_code(client, flow, code, req)
+        assert r.status_code == 400 and "Sign-in expired" in r.text

@@ -33,15 +33,14 @@ DEFAULT_GROUPS: tuple[Group, ...] = ("activity", "weight", "sleep", "hrv")
 # another; the others cost one request per range (or per 28-day chunk).
 MAX_PER_DAY_DAYS = 120
 MAX_RANGE_DAYS = 366
-SLEEP_CHUNK_DAYS = 28  # Garmin's limit for the sleep statistics endpoint
 # Per-day requests run this many at a time.
 PER_DAY_WORKERS = 4
 
-# The range endpoints below aren't garminconnect getters; they're reached with
-# connectapi(path). Over HTTP only paths matching this are allowed.
+# Training readiness for a range has no garminconnect getter, so it's reached
+# with connectapi(path). Over HTTP only paths matching this are allowed. (HRV
+# and sleep use garminconnect's range getters, which are on the allowlist.)
 RANGE_PATHS = re.compile(
-    r"/(hrv-service/hrv/daily|sleep-service/stats/sleep/daily"
-    r"|metrics-service/metrics/trainingreadiness)/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}"
+    r"/metrics-service/metrics/trainingreadiness/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}"
 )
 
 # Each group's columns, in output order.
@@ -333,7 +332,7 @@ def _lifestyle(log: dict) -> dict:
 
 
 def _hrv(api: Any, start: date, end: date) -> dict[str, dict]:
-    resp = api.connectapi(f"/hrv-service/hrv/daily/{start}/{end}") or {}
+    resp = api.get_hrv_data_range(start.isoformat(), end.isoformat()) or {}
     out = {}
     for h in resp.get("hrvSummaries") or []:
         baseline = h.get("baseline") or {}
@@ -349,27 +348,26 @@ def _hrv(api: Any, start: date, end: date) -> dict[str, dict]:
 
 
 def _sleep(api: Any, start: date, end: date) -> dict[str, dict]:
+    # garminconnect splits the range into the endpoint's 28-day chunks.
     out = {}
-    for chunk_start, chunk_end in _chunks(start, end, SLEEP_CHUNK_DAYS):
-        resp = api.connectapi(f"/sleep-service/stats/sleep/daily/{chunk_start}/{chunk_end}") or {}
-        for night in resp.get("individualStats") or []:
-            v = night.get("values") or {}
-            out[night["calendarDate"]] = dict(
-                sleep_score=v.get("sleepScore"),
-                sleep_quality=v.get("sleepScoreQuality"),
-                sleep_start=_local_time(v.get("localSleepStartTimeInMillis")),
-                sleep_end=_local_time(v.get("localSleepEndTimeInMillis")),
-                sleep_minutes=_minutes(v.get("totalSleepTimeInSeconds")),
-                deep_sleep_minutes=_minutes(v.get("deepTime")),
-                light_sleep_minutes=_minutes(v.get("lightTime")),
-                rem_sleep_minutes=_minutes(v.get("remTime")),
-                awake_minutes=_minutes(v.get("awakeTime")),
-                sleep_avg_hr=_round(v.get("avgHeartRate")),
-                sleep_respiration=_round(v.get("respiration"), 1),
-                sleep_spo2=_round(v.get("spO2"), 1),
-                sleep_body_battery_change=v.get("bodyBatteryChange"),
-                sleep_need_minutes=v.get("sleepNeed"),
-            )
+    for night in api.get_sleep_daily(start.isoformat(), end.isoformat()) or []:
+        v = night.get("values") or {}
+        out[night["calendarDate"]] = dict(
+            sleep_score=v.get("sleepScore"),
+            sleep_quality=v.get("sleepScoreQuality"),
+            sleep_start=_local_time(v.get("localSleepStartTimeInMillis")),
+            sleep_end=_local_time(v.get("localSleepEndTimeInMillis")),
+            sleep_minutes=_minutes(v.get("totalSleepTimeInSeconds")),
+            deep_sleep_minutes=_minutes(v.get("deepTime")),
+            light_sleep_minutes=_minutes(v.get("lightTime")),
+            rem_sleep_minutes=_minutes(v.get("remTime")),
+            awake_minutes=_minutes(v.get("awakeTime")),
+            sleep_avg_hr=_round(v.get("avgHeartRate")),
+            sleep_respiration=_round(v.get("respiration"), 1),
+            sleep_spo2=_round(v.get("spO2"), 1),
+            sleep_body_battery_change=v.get("bodyBatteryChange"),
+            sleep_need_minutes=v.get("sleepNeed"),
+        )
     return out
 
 
@@ -396,13 +394,6 @@ def _readiness(api: Any, start: date, end: date) -> dict[str, dict]:
 
 
 # --- helpers --------------------------------------------------------------------
-
-
-def _chunks(start: date, end: date, size: int):
-    while start <= end:
-        chunk_end = min(start + timedelta(days=size - 1), end)
-        yield start, chunk_end
-        start = chunk_end + timedelta(days=1)
 
 
 def _local_time(millis: int | None) -> str | None:

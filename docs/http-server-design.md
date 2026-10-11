@@ -76,7 +76,18 @@ Connecting a client:
 4. `/login` (POST) logs in with `Garmin(..., return_on_mfa=True)`.
    - MFA required → keep the half-finished login state in memory under the
      request ID (a few minutes, never on disk) and show an MFA-code form.
-     The second POST calls `resume_login(state, code)`.
+     The second POST calls `resume_login(state, code)`. After a wrong code
+     Garmin keeps the step open, so the form is shown again with the error
+     (each wrong code counts toward the failure limit); if Garmin has closed
+     the step, the owner starts over. If Garmin couldn't be reached while
+     checking the code, the owner is told so, it isn't counted as a failed
+     attempt, and the same code can simply be sent again. One code at a time is checked per
+     step, and expiry is checked again when a waiting submission's turn
+     comes. A repeat of the same wrong code is replayed rather than sent
+     again, but after a temporary failure (Garmin unreachable or
+     rate-limiting) the same code is really tried again. Once the step has
+     succeeded, any submission for it gets that success. The form links to
+     "Start over".
 5. On success: check the session's Garmin profile ID equals
    `KCAL_GARMIN_OWNER`. If not, discard the session and fail.
 6. Save the Garmin tokens to the token store, replace the server's cached
@@ -233,11 +244,12 @@ kept. Elevation and time zone are left in: they're coarse.
 The allowlist lives in `endpoints.py` as one explicit set, so new
 `garminconnect` getters are blocked remotely until added on purpose.
 
-Besides getters, `get_garmin_summary` uses three Garmin range endpoints that
-`garminconnect` doesn't wrap (HRV, sleep statistics and training readiness
-for a date range). Remotely, raw requests are allowed only for those, with
-the whole path matched (`summary.RANGE_PATHS`: the endpoint followed by two
-dates), so nothing else is reachable that way. `get_garmin_day`'s `metrics`
+`get_garmin_summary` reads HRV and sleep for a date range through
+garminconnect's range getters (`get_hrv_data_range`, `get_sleep_daily`),
+which are on the allowlist. Training readiness for a range has no getter, so
+it is the one raw request: remotely, raw requests are allowed only for that
+endpoint, with the whole path matched (`summary.RANGE_PATHS`: the endpoint
+followed by two dates), so nothing else is reachable that way. `get_garmin_day`'s `metrics`
 schema lists only the allowlisted single-day endpoints, so other names are
 refused before any code runs.
 
