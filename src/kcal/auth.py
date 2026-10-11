@@ -66,7 +66,7 @@ def login(
     password = password or os.environ.get("GARMIN_PASSWORD")
 
     api = Garmin(email=email, password=password, prompt_mfa=prompt_mfa)
-    _serialize_token_refresh(api.client)
+    _guard_token_refresh(api.client)
     credential_login = api.client.login
 
     def checked_login(*args, **kwargs):
@@ -90,22 +90,22 @@ def login(
     return api
 
 
-def _serialize_token_refresh(client) -> None:
-    """garminconnect refreshes its token, and rewrites the token file, from
-    whichever request notices it needs to, with no lock. Requests made in
-    parallel (get_garmin_summary's per-day fetches) could then refresh at the
-    same time with the same refresh token and write the file concurrently.
-    One at a time, a second refresh uses the first one's new token. Observe
-    DI refresh responses as well: garminconnect 0.3.6 swallows failures and
-    retries an expired access token, turning temporary outages into a 401.
+def _guard_token_refresh(client) -> None:
+    """Preserve temporary DI refresh failures swallowed by garminconnect.
+
+    Reuse the client's reentrant token lock (0.3.17+) so the temporary HTTP
+    hook and recorded error are protected even when refresh is called
+    directly. No separate kcal lock is needed. See the upgrade guide.
     """
-    refresh = getattr(client, "_refresh_session", None)
-    if refresh is None or getattr(refresh, "kcal_serialized", False):
+    refresh = client._refresh_session
+    if getattr(refresh, "kcal_refresh_guarded", False):
         return
-    lock = threading.Lock()
+    lock = client._token_lock
+    if not isinstance(lock, type(threading.RLock())):
+        raise TypeError("Incompatible garminconnect client: _token_lock must be a threading.RLock")
 
     @functools.wraps(refresh)
-    def serialized(*args, **kwargs):
+    def guarded(*args, **kwargs):
         with lock:
             client.kcal_refresh_error = None
             if not getattr(client, "di_token", None):
@@ -143,5 +143,5 @@ def _serialize_token_refresh(client) -> None:
             finally:
                 client._http_post = post
 
-    serialized.kcal_serialized = True
-    client._refresh_session = serialized
+    guarded.kcal_refresh_guarded = True
+    client._refresh_session = guarded

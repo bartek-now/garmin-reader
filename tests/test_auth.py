@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 
 import pytest
 from garminconnect import GarminConnectAuthenticationError
@@ -7,6 +8,9 @@ from kcal import auth
 
 
 class Client:
+    def __init__(self):
+        self._token_lock = threading.RLock()
+
     def _refresh_session(self):
         pass
 
@@ -24,7 +28,7 @@ def constructed(monkeypatch):
             seen.append(kwargs)
 
         def login(self, token_store):
-            assert self.client._refresh_session.kcal_serialized
+            assert self.client._refresh_session.kcal_refresh_guarded
             assert Path(token_store).parent.is_dir()
             seen.append(token_store)
 
@@ -43,7 +47,7 @@ def test_login_uses_environment_credentials_and_state_directory(constructed, mon
         str(tmp_path / "state" / "garmin_tokens"),
     ]
     assert isinstance(api.client, Client)
-    assert api.client._refresh_session.kcal_serialized
+    assert api.client._refresh_session.kcal_refresh_guarded
     assert api.client.login.__func__ is Client.login  # temporary guard restored
 
 
@@ -57,7 +61,7 @@ def test_explicit_login_settings_win(constructed, monkeypatch, tmp_path):
         {"email": "explicit@example.com", "password": "explicit-password", "prompt_mfa": auth._prompt_mfa},
         str(store),
     ]
-    assert api.client._refresh_session.kcal_serialized
+    assert api.client._refresh_session.kcal_refresh_guarded
     assert not (tmp_path / "ignored").exists()
 
 
@@ -68,7 +72,7 @@ def test_cached_login_needs_no_credentials(constructed, monkeypatch, tmp_path):
     assert constructed[0]["email"] is None
     assert constructed[0]["password"] is None
     assert constructed[1] == str(tmp_path / "tokens")
-    assert api.client._refresh_session.kcal_serialized
+    assert api.client._refresh_session.kcal_refresh_guarded
 
 
 def test_login_preserves_authentication_failure(monkeypatch, tmp_path):
@@ -86,3 +90,23 @@ def test_login_preserves_authentication_failure(monkeypatch, tmp_path):
         auth.login(token_store=tmp_path / "tokens")
     assert raised.value is error
     assert api.client.login.__func__ is Client.login
+
+
+def test_refresh_guard_rejects_missing_lock_before_installing():
+    client = Client()
+    del client._token_lock
+    original = client._refresh_session
+    with pytest.raises(AttributeError, match="_token_lock"):
+        auth._guard_token_refresh(client)
+    assert client._refresh_session == original
+    assert "_refresh_session" not in vars(client)
+
+
+def test_refresh_guard_rejects_non_reentrant_lock_before_installing():
+    client = Client()
+    client._token_lock = threading.Lock()
+    original = client._refresh_session
+    with pytest.raises(TypeError, match="_token_lock must be a threading.RLock"):
+        auth._guard_token_refresh(client)
+    assert client._refresh_session == original
+    assert "_refresh_session" not in vars(client)

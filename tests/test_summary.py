@@ -419,27 +419,3 @@ def test_refresh_outage_stops_each_summary_fetch_path(api, monkeypatch, method, 
 def test_empty_range_has_the_usual_shape(api):
     assert summary.summarize(api, [], ["hrv"]) == {"fields": ["date"], "days": []}
     assert api.calls == []
-
-
-def test_token_refresh_is_serialized():
-    from kcal.auth import _serialize_token_refresh
-
-    running, overlaps = [], []
-
-    class Client:
-        def _refresh_session(self):
-            running.append(1)
-            if len(running) > 1:
-                overlaps.append(1)
-            threading.Event().wait(0.05)
-            running.pop()
-
-    client = Client()
-    _serialize_token_refresh(client)
-    _serialize_token_refresh(client)  # idempotent
-    threads = [threading.Thread(target=client._refresh_session) for _ in range(4)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert overlaps == []
