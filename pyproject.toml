@@ -2,10 +2,10 @@
 name = "kcal"
 version = "0.1.0"
 description = "Fetch daily steps and workout calories from Garmin Connect, with workout steps deduplicated from the daily total."
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "anyio>=4",
-    "garminconnect>=0.2.24",
+    "garminconnect>=0.3.6,<0.4",
     "mcp>=1.10,<2",
     "uvicorn>=0.31.1",
 ]

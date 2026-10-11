@@ -20,7 +20,7 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
-from kcal.auth import GarminLoginError
+from kcal.auth import GarminLoginError, is_refresh_unavailable
 
 # Compact per-day summaries; the intraday series (heart_rates, stress_data,
 # steps_data, ...) are large and must be requested explicitly.
@@ -87,7 +87,7 @@ PRIVATE_KEY_WORDS = frozenset({
 # ...or one of these consecutive word pairs.
 PRIVATE_KEY_PHRASES = frozenset({
     ("full", "name"), ("display", "name"), ("profile", "image"), ("user", "info"),
-    ("activity", "name"), ("course", "name"),
+    ("activity", "name"), ("course", "name"), ("workout", "name"),
 })
 
 
@@ -263,6 +263,8 @@ def day_metrics(
         except (GarminLoginError, GarminConnectAuthenticationError, GarminConnectTooManyRequestsError):
             raise  # affects every metric: fail the call once, don't retry per metric
         except Exception as err:  # one failing metric shouldn't sink the rest
+            if is_refresh_unavailable(err):
+                raise
             out[m] = {"error": f"{type(err).__name__}: {err}"}
     return _fit_total(out)
 

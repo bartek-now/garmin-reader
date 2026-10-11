@@ -91,6 +91,8 @@ Rules for the login page:
   IP, since everything arrives through the tunnel), then refuse until the
   window passes. Failed attempts reach Garmin, which can lock or throttle the
   account; this is what protects it.
+  In-flight attempts keep their slots through profile lookup and owner
+  validation, including after the MFA step.
 - The pending request expires after 10 minutes; codes are single-use and
   expire after 5 minutes.
 - Basic hardening: CSRF token in the form, `Cache-Control: no-store`,
@@ -110,6 +112,17 @@ put in front later without restructuring it.
 All stored in one SQLite file (`KCAL_STATE_DIR/mcp_auth.sqlite`): registered
 clients, refresh tokens, access tokens (hashed). Moving hosts = copying this
 file; skipping the copy costs one reconnect per client.
+
+The database also records the configured owner and a revocation generation.
+Changing owners deletes existing tokens and advances the generation. Pending
+sign-ins and authorization codes carry their starting generation, and token
+issuance checks it in the same SQLite transaction as the write. `--revoke-all`
+advances that generation too, so a separate CLI process can invalidate codes
+and pending sign-ins held in the running server's memory. Existing databases
+are migrated on startup; tokens for the unchanged owner remain valid.
+
+Each loaded Garmin session is checked against the configured owner before
+any tool can read health data. A newly loaded session must be checked again.
 
 ## 3. Expired credentials
 
@@ -213,7 +226,7 @@ passes through a filter that drops, recursively, keys containing the words
 `latitude`, `longitude`, `polyline`, `geo`, `location`, `owner`, `fullname`,
 `displayname`, `email` or `description`, or the word pairs "full name",
 "display name", "profile image", "user info", "activity name" or "course
-name" (Garmin names activities after the place, e.g. "Poznan Running"). Keys are split into words (camelCase or
+name", or "workout name" (these titles can contain places). Keys are split into words (camelCase or
 snake_case) and compared whole, so `averageOxygen…` and `timeAllocation` are
 kept. Elevation and time zone are left in: they're coarse.
 

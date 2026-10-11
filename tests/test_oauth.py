@@ -95,7 +95,7 @@ def connect(client, provider):
     verifier, challenge = pkce()
     r = start_authorize(client, client_id, challenge)
     request_id = query(r.headers["location"])["req"]
-    back = provider.complete_authorization(request_id, subject="owner")
+    back = provider.complete_authorization(request_id, subject=str(OWNER))
     r = exchange_code(client, client_id, query(back)["code"], verifier)
     assert r.status_code == 200, r.text
     return client_id, r.json()
@@ -166,7 +166,7 @@ def test_full_flow_then_mcp_works(client, provider):
 def test_completion_redirects_back_with_state(client, provider):
     client_id = register(client)
     r = start_authorize(client, client_id, pkce()[1])
-    back = provider.complete_authorization(query(r.headers["location"])["req"], "owner")
+    back = provider.complete_authorization(query(r.headers["location"])["req"], str(OWNER))
     assert back.startswith(REDIRECT + "?")
     assert query(back)["state"] == "st4te" and query(back)["code"]
 
@@ -181,9 +181,9 @@ def test_denied_authorization_redirects_with_error(client, provider):
 def test_authorization_request_is_single_use(client, provider):
     client_id = register(client)
     request_id = query(start_authorize(client, client_id, pkce()[1]).headers["location"])["req"]
-    provider.complete_authorization(request_id, "owner")
+    provider.complete_authorization(request_id, str(OWNER))
     with pytest.raises(KeyError):
-        provider.complete_authorization(request_id, "owner")
+        provider.complete_authorization(request_id, str(OWNER))
     assert provider.deny_authorization(request_id) is None
 
 
@@ -194,7 +194,7 @@ def test_authorization_request_expires(client, provider, monkeypatch):
     monkeypatch.setattr(oauth.time, "time", lambda: later)
     assert provider.pending(request_id) is None
     with pytest.raises(KeyError):
-        provider.complete_authorization(request_id, "owner")
+        provider.complete_authorization(request_id, str(OWNER))
 
 
 def test_authorize_rejects_other_resource(client):
@@ -212,7 +212,7 @@ def authorized_code(client, provider):
     client_id = register(client)
     verifier, challenge = pkce()
     request_id = query(start_authorize(client, client_id, challenge).headers["location"])["req"]
-    code = query(provider.complete_authorization(request_id, "owner"))["code"]
+    code = query(provider.complete_authorization(request_id, str(OWNER)))["code"]
     return client_id, code, verifier
 
 
@@ -340,7 +340,7 @@ def test_tokens_carry_the_owner(client, provider):
     _, tokens = connect(client, provider)
     import asyncio
     loaded = asyncio.run(provider.load_access_token(tokens["access_token"]))
-    assert loaded.subject == "owner" and loaded.resource == RESOURCE
+    assert loaded.subject == str(OWNER) and loaded.resource == RESOURCE
 
 
 # --- the login page route ------------------------------------------------------------
@@ -479,3 +479,98 @@ def test_revoke_all_command_without_database(tmp_path, monkeypatch, capsys):
     assert mcp_server.main(["--revoke-all"]) == 0
     assert "nothing to revoke" in capsys.readouterr().err
     assert not (tmp_path / "mcp_auth.sqlite").exists()
+
+
+def test_changed_owner_revokes_tokens_and_codes(client, provider, db):
+    client_id, tokens = connect(client, provider)
+    code_client, code, verifier = authorized_code(client, provider)
+    changed = KcalOAuthProvider(db, PUBLIC)
+    try:
+        server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=OWNER + 1), changed)
+        with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
+            assert mcp_call(c, tokens["access_token"]).status_code == 401
+            assert refresh(c, client_id, tokens["refresh_token"]).status_code == 400
+            new_client = register(c)
+            new_verifier, challenge = pkce()
+            req = query(start_authorize(c, new_client, challenge).headers["location"])["req"]
+            new_code = query(changed.complete_authorization(req, str(OWNER + 1)))["code"]
+            r = exchange_code(c, new_client, new_code, new_verifier)
+            assert r.status_code == 200
+            assert mcp_call(c, r.json()["access_token"]).status_code == 200
+        # The old, still-running provider also sees the ownership change.
+        assert mcp_call(client, tokens["access_token"]).status_code == 401
+        assert exchange_code(client, code_client, code, verifier).status_code == 400
+        changed.configure_owner(OWNER)
+        assert mcp_call(client, tokens["access_token"]).status_code == 401
+        assert exchange_code(client, code_client, code, verifier).status_code == 400
+    finally:
+        changed.close()
+
+
+def test_first_owner_binding_migrates_existing_tokens(client, provider, db):
+    _, mine = connect(client, provider)
+    _, other = connect(client, provider)
+    with sqlite3.connect(db) as raw:
+        raw.execute("UPDATE tokens SET subject = ? WHERE token_hash = ?",
+                    (str(OWNER + 1), oauth._hash(other["access_token"])))
+        raw.execute("DROP TABLE auth_state")  # the schema before owner binding
+    migrated = KcalOAuthProvider(db, PUBLIC)
+    try:
+        server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=OWNER), migrated)
+        with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
+            assert mcp_call(c, mine["access_token"]).status_code == 200
+            assert mcp_call(c, other["access_token"]).status_code == 401
+    finally:
+        migrated.close()
+
+
+def test_provider_rejects_wrong_owner_at_completion(client, provider):
+    client_id = register(client)
+    req = query(start_authorize(client, client_id, pkce()[1]).headers["location"])["req"]
+    with pytest.raises(KeyError, match="different owner"):
+        provider.complete_authorization(req, str(OWNER + 1))
+
+
+def test_revoke_cli_invalidates_codes_and_waiting_logins(client, provider, db, monkeypatch):
+    client_id, code, verifier = authorized_code(client, provider)
+    req = query(start_authorize(client, client_id, pkce()[1]).headers["location"])["req"]
+    monkeypatch.setenv("KCAL_STATE_DIR", str(db.parent))
+    assert mcp_server.main(["--revoke-all"]) == 0
+    r = exchange_code(client, client_id, code, verifier)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+    assert provider.pending(req) is None
+    with pytest.raises(KeyError):
+        provider.complete_authorization(req, str(OWNER))
+    # A genuinely new authorization after revocation remains usable.
+    _, tokens = connect(client, provider)
+    assert mcp_call(client, tokens["access_token"]).status_code == 200
+
+
+@pytest.mark.parametrize("kind", ["code", "refresh"])
+@pytest.mark.parametrize("change", ["revoke", "owner"])
+def test_revocation_between_loading_and_exchanging(client, provider, db, kind, change):
+    import asyncio
+
+    if kind == "code":
+        client_id, code, _ = authorized_code(client, provider)
+        registered = asyncio.run(provider.get_client(client_id))
+        loaded = asyncio.run(provider.load_authorization_code(registered, code))
+        exchange = lambda: provider.exchange_authorization_code(registered, loaded)
+    else:
+        client_id, tokens = connect(client, provider)
+        registered = asyncio.run(provider.get_client(client_id))
+        loaded = asyncio.run(provider.load_refresh_token(registered, tokens["refresh_token"]))
+        exchange = lambda: provider.exchange_refresh_token(registered, loaded, [oauth.SCOPE])
+    assert loaded is not None
+    other_process = KcalOAuthProvider(db, PUBLIC)
+    try:
+        if change == "revoke":
+            other_process.revoke_all()
+        else:
+            other_process.configure_owner(OWNER + 1)
+        with pytest.raises(oauth.TokenError):
+            asyncio.run(exchange())
+        with sqlite3.connect(db) as raw:
+            assert raw.execute("SELECT COUNT(*) FROM tokens").fetchone()[0] == 0
+    finally:
+        other_process.close()

@@ -77,6 +77,10 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
 - **Upgrades:** rebuild and restart. Everything in the volume survives;
   sign-ins in progress don't.
 - **Signing everyone out:** `docker exec kcal-mcp kcal-mcp --revoke-all`.
+  This also invalidates sign-ins in progress and outstanding authorization codes.
+- **Changing owners:** changing `KCAL_GARMIN_OWNER` revokes previous
+  authorizations. Sign in as the new owner at `/login`, then reconnect clients.
+  Stored Garmin credentials for a different account cannot serve health data.
 - **Garmin session expired:** the tools reply with a link to `/login`; signing
   in there fixes it without reconnecting anything.
 - **Logs** go to stdout: every request's status line, plus the reason for any

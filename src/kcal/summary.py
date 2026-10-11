@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from garminconnect import GarminConnectAuthenticationError, GarminConnectTooManyRequestsError
 
-from kcal.auth import GarminLoginError
+from kcal.auth import GarminLoginError, is_refresh_unavailable
 from kcal.client import fetch_activities, fetch_day_summary, fetch_weigh_ins
 from kcal.dedupe import build_day_stats, build_weight_row
 from kcal.models import Workout
@@ -147,6 +147,8 @@ def summarize(api: Any, days: list[date], groups: list[str]) -> dict:
         except _LOGIN_ERRORS:
             raise
         except Exception as err:
+            if is_refresh_unavailable(err):
+                raise
             for g in failing_groups:
                 errors[g] = _message(err)
             return None
@@ -183,6 +185,8 @@ def summarize(api: Any, days: list[date], groups: list[str]) -> dict:
             except _LOGIN_ERRORS:
                 raise
             except Exception as err:
+                if is_refresh_unavailable(err):
+                    raise
                 failed.update({g: _message(err) for g in daily_groups})
         if lifestyle:
             try:
@@ -190,6 +194,8 @@ def summarize(api: Any, days: list[date], groups: list[str]) -> dict:
             except _LOGIN_ERRORS:
                 raise
             except Exception as err:
+                if is_refresh_unavailable(err):
+                    raise
                 failed["lifestyle"] = _message(err)
         return fields, failed
 
