@@ -16,13 +16,14 @@ account, so they are capped for the whole server.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import secrets
 import time
 from collections import deque
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -76,6 +77,14 @@ class GarminGateway:
     def finish(self, api: Any, code: str) -> None:
         api.resume_login(None, code)
 
+    def mfa_pending(self, api: Any) -> bool:
+        """Whether Garmin still holds the verification step open. garminconnect
+        0.3.17 keeps it after a wrong (or rate-limited) code, so the owner can
+        retype the code. If the flag ever disappears, this says no and the
+        owner starts over, as before.
+        """
+        return bool(getattr(api.client, "_mfa_pending", False))
+
     def profile_id(self, api: Any) -> int:
         return garmin_profile_id(api)
 
@@ -96,6 +105,10 @@ class _MfaFlow:
     api: Any
     request_id: str | None
     expires_at: float
+    # One code at a time reaches Garmin for this step.
+    lock: anyio.Lock = field(default_factory=anyio.Lock)
+    # The response that finished the step, for any later submission of it.
+    completed: tuple[int, bytes, list] | None = None
 
 
 @dataclass
@@ -159,8 +172,17 @@ class LoginPage:
             return self._secure(RedirectResponse(back, status_code=303))
         if action == "mfa":
             flow = str(form.get("flow", ""))
+            code = str(form.get("code", "")).strip()
+            finished = self._mfa.get(flow)
+            if finished is not None and finished.completed is not None:
+                # The step already succeeded: whatever was submitted, send the
+                # browser where the success went (even for a code whose
+                # earlier failure is remembered).
+                return self._replay(finished.completed)
+            # Keyed by the code too: a repeated submission of the same code is
+            # replayed, but a corrected code is really tried.
             return await self._once(
-                f"mfa:{flow}",
+                f"mfa:{flow}:{hashlib.sha256(code.encode()).hexdigest()}",
                 lambda: self._mfa_step(request, flow, request_id, str(form.get("code", ""))),
             )
         return await self._once(
@@ -179,24 +201,32 @@ class LoginPage:
         if (seen := self._submissions.get(key)) is not None:
             await seen.done.wait()
             if seen.response is not None:
-                status, body, headers = seen.response
-                replay = Response(body, status_code=status)
-                replay.raw_headers = list(headers)
-                return replay
+                return self._replay(seen.response)
         while len(self._submissions) >= MAX_MFA_FLOWS * 5:
             del self._submissions[min(self._submissions, key=lambda k: self._submissions[k].expires_at)]
         entry = self._submissions[key] = _Submission(anyio.Event(), now + MFA_SECONDS)
         try:
             response = await run()
-            if response.status_code == 429:
-                # Paused, not attempted: once the pause ends, the same form
-                # must really be tried, not get this answer again.
+            if response.status_code == 429 or not getattr(response, "kcal_replayable", True):
+                # Paused, or Garmin failed temporarily: the same form must
+                # really be tried again later, not get this answer again.
                 del self._submissions[key]
             else:
-                entry.response = (response.status_code, bytes(response.body), list(response.raw_headers))
+                entry.response = self._snapshot(response)
             return response
         finally:
             entry.done.set()
+
+    @staticmethod
+    def _snapshot(response: Response) -> tuple[int, bytes, list]:
+        return response.status_code, bytes(response.body), list(response.raw_headers)
+
+    @staticmethod
+    def _replay(snapshot: tuple[int, bytes, list]) -> Response:
+        status, body, headers = snapshot
+        replay = Response(body, status_code=status)
+        replay.raw_headers = list(headers)
+        return replay
 
     # --- steps -------------------------------------------------------------------
 
@@ -230,16 +260,39 @@ class LoginPage:
                 request, "Sign-in expired",
                 "The verification step expired or was already used.", request_id,
             )
-        if locked := self._locked(request, flow.request_id):
-            return locked  # the code can still be entered once the pause ends
-        del self._mfa[flow_id]
-        with self._attempt():
-            try:
-                await anyio.to_thread.run_sync(self.garmin.finish, flow.api, code.strip())
-            except Exception as err:
-                # Garmin's MFA state is single use: a wrong code means starting over.
-                return self._failed(request, flow.request_id, err, "")
-            return await self._finish(request, flow.api, flow.request_id)
+        async with flow.lock:
+            if flow.completed is not None:
+                # Already finished, e.g. by an earlier submission with another
+                # code: send the browser where that one went, not to an error.
+                return self._replay(flow.completed)
+            if flow.expires_at <= time.time():
+                # Expired while this submission waited for the one before it.
+                self._mfa.pop(flow_id, None)
+            if self._mfa.get(flow_id) is not flow:
+                return self._dead_end(
+                    request, "Sign-in expired",
+                    "The verification step expired or was already used.", request_id,
+                )
+            if locked := self._locked(request, flow.request_id):
+                return locked  # the code can still be entered once the pause ends
+            with self._attempt():
+                try:
+                    await anyio.to_thread.run_sync(self.garmin.finish, flow.api, code.strip())
+                except Exception as err:
+                    message = self._record_failure(err, what="code")
+                    if self.garmin.mfa_pending(flow.api):
+                        # Garmin keeps the step open: let the owner retype the code.
+                        retry = self._mfa_form(request, flow_id, flow.request_id, error=message)
+                        if isinstance(err, (GarminConnectConnectionError,
+                                            GarminConnectTooManyRequestsError)):
+                            # Temporary: the same code may well work later.
+                            retry.kcal_replayable = False
+                        return retry
+                    del self._mfa[flow_id]
+                    return self._form(request, flow.request_id, error=message)
+                response = await self._finish(request, flow.api, flow.request_id)
+                flow.completed = self._snapshot(response)
+                return response
 
     async def _finish(self, request, api, request_id) -> Response:
         try:
@@ -311,16 +364,21 @@ class LoginPage:
         )
 
     def _failed(self, request, request_id, err: Exception, email: str) -> Response:
+        return self._form(request, request_id, error=self._record_failure(err), email=email)
+
+    def _record_failure(self, err: Exception, what: str = "") -> str:
+        """Count the failure toward the limit (unless Garmin was simply
+        unreachable) and say what went wrong.
+        """
         if isinstance(err, GarminConnectConnectionError):
             # Garmin unreachable: not the owner's fault, not counted.
-            message = "Couldn't reach Garmin. Please try again in a moment."
-        else:
-            self._failures.append(time.time())
-            if isinstance(err, GarminConnectTooManyRequestsError):
-                message = "Garmin is limiting sign-ins right now. Please wait a few minutes."
-            else:
-                message = "Garmin didn't accept that. Check your email, password or code and try again."
-        return self._form(request, request_id, error=message, email=email)
+            return "Couldn't reach Garmin. Please try again in a moment."
+        self._failures.append(time.time())
+        if isinstance(err, GarminConnectTooManyRequestsError):
+            return "Garmin is limiting sign-ins right now. Please wait a few minutes."
+        if what == "code":
+            return "Garmin didn't accept that code. Check it and try again."
+        return "Garmin didn't accept that. Check your email, password or code and try again."
 
     def _expired_request(self, request, request_id) -> Response:
         return self._dead_end(
@@ -395,14 +453,17 @@ class LoginPage:
             )
         return self._with_csrf(self._page("Sign in to Garmin", body), csrf)
 
-    def _mfa_form(self, request, flow: str, request_id) -> Response:
+    def _mfa_form(self, request, flow: str, request_id, error: str = "") -> Response:
         csrf = request.cookies.get(CSRF_COOKIE) or secrets.token_urlsafe(32)
+        start_over = f"/login?req={html.escape(request_id)}" if request_id else "/login"
         body = (
             "<p>Garmin sent you a verification code. Enter it to finish signing in.</p>"
+            f"{self._error(error)}"
             f'<form method="post">{self._hidden(csrf, flow=flow, req=request_id or "")}'
             f'<label>Code<input name="code" inputmode="numeric" autocomplete="one-time-code" '
             f'required autofocus></label>'
             f'<button name="action" value="mfa">Verify</button></form>'
+            f'<a class="button secondary" href="{start_over}">Start over</a>'
         )
         return self._with_csrf(self._page("Verification code", body), csrf)
 
@@ -452,8 +513,9 @@ border-radius:8px;background:#1d4ed8;color:#fff;cursor:pointer}
 button.secondary{background:#e5e7eb;color:#1d2330}
 a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;
 padding:.65rem;margin-top:.6rem;font-weight:600;border-radius:8px;background:#1d4ed8;color:#fff}
+a.button.secondary{background:#e5e7eb;color:#1d2330}
 .error{color:#b91c1c;font-weight:600}
 @media (prefers-color-scheme:dark){body{background:#111318;color:#e6e8ec}
 main{background:#1b1e25;box-shadow:none}input{background:#111318;color:inherit;border-color:#3a3f4b}
-button.secondary{background:#2a2f3a;color:#e6e8ec}.error{color:#f87171}}
+button.secondary,a.button.secondary{background:#2a2f3a;color:#e6e8ec}.error{color:#f87171}}
 """

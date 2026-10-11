@@ -76,7 +76,16 @@ Connecting a client:
 4. `/login` (POST) logs in with `Garmin(..., return_on_mfa=True)`.
    - MFA required → keep the half-finished login state in memory under the
      request ID (a few minutes, never on disk) and show an MFA-code form.
-     The second POST calls `resume_login(state, code)`.
+     The second POST calls `resume_login(state, code)`. After a wrong code
+     Garmin keeps the step open, so the form is shown again with the error
+     (each wrong code counts toward the failure limit); if Garmin has closed
+     the step, the owner starts over. One code at a time is checked per
+     step, and expiry is checked again when a waiting submission's turn
+     comes. A repeat of the same wrong code is replayed rather than sent
+     again, but after a temporary failure (Garmin unreachable or
+     rate-limiting) the same code is really tried again. Once the step has
+     succeeded, any submission for it gets that success. The form links to
+     "Start over".
 5. On success: check the session's Garmin profile ID equals
    `KCAL_GARMIN_OWNER`. If not, discard the session and fail.
 6. Save the Garmin tokens to the token store, replace the server's cached

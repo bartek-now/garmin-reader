@@ -577,3 +577,78 @@ def test_summary_reads_the_real_getters_output(garmin):
     }
     assert rows["2026-09-29"]["hrv_last_night_ms"] == 41
     assert {"sleep_score", "hrv_last_night_ms"} <= set(fields)
+
+
+# --- the verification step the login page lets the owner retry --------------------
+#
+# Only Garmin's MFA verify endpoints are faked: the real _complete_mfa decides
+# what each answer means and the real resume_login decides what happens to
+# the step, which is what GarminGateway.mfa_pending() then reports.
+
+
+class FakeSSO:
+    """Garmin's MFA verify endpoints: each POST gets the next answer."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.codes = []
+
+    def post(self, url, params=None, headers=None, json=None, timeout=None):
+        self.codes.append(json["mfaVerificationCode"])
+        status, body = self.answers.pop(0)
+        return response(status, body, url)
+
+
+WRONG = (200, {"responseStatus": {"type": "INVALID_MFA_CODE"}})
+LIMITED = (429, {})
+ACCEPTED = (200, {"responseStatus": {"type": "SUCCESSFUL"}, "serviceTicketId": "ST-1"})
+
+
+def awaiting_code(garmin, answers):
+    """The client as a password login that needs a code leaves it (portal
+    flow). Those attributes are created by that login, not in __init__, so
+    stub() can't check them; if _complete_mfa stops reading them, these
+    tests fail instead.
+    """
+    client = garmin.client
+    stub(client, "_mfa_pending", True)
+    sso = FakeSSO(answers)
+    client._mfa_session, client._mfa_flow, client._mfa_method = sso, "portal", "email"
+    client._mfa_login_params, client._mfa_post_headers = {}, {}
+    return sso
+
+
+def test_wrong_mfa_code_leaves_the_step_open(garmin):
+    from kcal.login_page import GarminGateway
+
+    sso = awaiting_code(garmin, [WRONG, WRONG])
+    with pytest.raises(GarminConnectAuthenticationError):
+        garmin.resume_login(None, "000000")
+    assert sso.codes == ["000000", "000000"]  # both verify endpoints asked
+    assert GarminGateway().mfa_pending(garmin)  # so /login offers the code form again
+
+
+def test_rate_limited_mfa_code_leaves_the_step_open(garmin):
+    from kcal.login_page import GarminGateway
+
+    awaiting_code(garmin, [LIMITED, LIMITED])
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        garmin.resume_login(None, "123456")
+    assert GarminGateway().mfa_pending(garmin)
+
+
+def test_corrected_code_signs_in_and_closes_the_step(garmin):
+    from kcal.login_page import GarminGateway
+
+    sso = awaiting_code(garmin, [WRONG, WRONG, ACCEPTED])
+    with pytest.raises(GarminConnectAuthenticationError):
+        garmin.resume_login(None, "000000")
+    tickets = []
+    # What follows an accepted code reaches Garmin's servers: faked too.
+    stub(garmin.client, "_establish_session",
+         lambda ticket, sess=None, service_url=None: tickets.append(ticket))
+    stub(garmin.client, "_verify_token", lambda: True)
+    stub(garmin, "_load_profile_and_settings", lambda: None)
+    garmin.resume_login(None, "123456")
+    assert tickets == ["ST-1"] and sso.codes[-1] == "123456"
+    assert not GarminGateway().mfa_pending(garmin)
