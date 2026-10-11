@@ -25,9 +25,12 @@ Garmin. Three layers make sure of that:
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import ipaddress
 import json
 import socket
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -42,7 +45,7 @@ from garminconnect import (
 from mcp.server.fastmcp.exceptions import ToolError
 
 from kcal import mcp_server
-from kcal.auth import _serialize_token_refresh
+from kcal.auth import GarminRefreshUnavailable, _guard_token_refresh
 from kcal.oauth import KcalOAuthProvider
 from kcal.settings import HttpSettings
 
@@ -177,6 +180,11 @@ def garmin():
     api = Garmin(retry_attempts=0)
     api.display_name = "owner"
     client = api.client
+    # Fail before even the unguarded concurrency checks can deadlock if
+    # upstream replaces its reentrant lock with a plain lock.
+    assert isinstance(client._token_lock, type(threading.RLock())), (
+        "garminconnect's _token_lock must remain a threading.RLock"
+    )
     stub(client, "di_token", "old-access")
     stub(client, "di_refresh_token", "refresh")
     stub(client, "di_client_id", "cid")
@@ -216,7 +224,7 @@ def test_logged_out_is_an_authentication_error(garmin, guarded):
     stub(garmin.client, "_api_session", session)
     attempts = refresh_answers(garmin, 400)
     if guarded:
-        _serialize_token_refresh(garmin.client)
+        _guard_token_refresh(garmin.client)
     with pytest.raises(GarminConnectAuthenticationError):
         garmin.get_sleep_data("2026-10-05")
     assert attempts == ["refresh"]  # it tried to renew once
@@ -233,16 +241,94 @@ def test_rate_limiting_is_not_an_authentication_error(garmin):
     assert attempts == []
 
 
-def test_refresh_lock_still_wraps_the_real_client(garmin):
-    # kcal serializes garminconnect's refresh by wrapping this method.
-    _serialize_token_refresh(garmin.client)
-    assert garmin.client._refresh_session.kcal_serialized
+def test_refresh_guard_still_wraps_the_real_client(garmin):
+    _guard_token_refresh(garmin.client)
+    guarded = garmin.client._refresh_session
+    _guard_token_refresh(garmin.client)
+    assert garmin.client._refresh_session is guarded  # idempotent
+    assert garmin.client._refresh_session.kcal_refresh_guarded
     session = FakeGarminApi({"new-access": 200})
     stub(garmin.client, "_api_session", session)
     attempts = refresh_answers(garmin, 200)
     assert garmin.get_sleep_data("2026-10-05")["dailySleepDTO"]["sleepTimeSeconds"] == 25000
     assert session.requests == ["old-access", "new-access"]
     assert attempts == ["refresh"]
+
+
+@pytest.mark.parametrize("failure", [429, 500, 503, 408, "timeout", "connection"])
+def test_upstream_still_hides_temporary_refresh_failures(garmin, failure):
+    # Removal check for kcal's HTTP interception. If upstream fixes this,
+    # revisit the workaround instead of relaxing this assertion.
+    session = FakeGarminApi({})
+    stub(garmin.client, "_api_session", session)
+    attempts = []
+
+    def post(url, **kwargs):
+        attempts.append(kwargs["data"]["refresh_token"])
+        if failure == "timeout":
+            raise requests.exceptions.Timeout("timed out")
+        if failure == "connection":
+            raise requests.exceptions.ConnectionError("unreachable")
+        return response(failure, {"error": "temporarily_unavailable"}, url)
+
+    stub(garmin.client, "_http_post", post)
+    with pytest.raises(GarminConnectAuthenticationError):
+        garmin.get_sleep_data("2026-10-05")
+    assert attempts == ["refresh"]
+    assert session.requests == ["old-access", "old-access"]
+    assert garmin.client.di_refresh_token == "refresh"
+
+
+@pytest.mark.parametrize("guarded", [False, True])
+def test_concurrent_real_refresh_rotates_and_persists_tokens(garmin, tmp_path, guarded):
+    client = garmin.client
+    store = tmp_path / "tokens"
+    stub(client, "_tokenstore_path", str(store))
+    attempts = []
+    active = 0
+    peak = 0
+    counter_lock = threading.Lock()
+    start = threading.Barrier(4)
+
+    def post(url, **kwargs):
+        nonlocal active, peak
+        with counter_lock:
+            active += 1
+            peak = max(peak, active)
+            attempts.append(kwargs["data"]["refresh_token"])
+            number = len(attempts)
+        try:
+            # Give the other ready workers time to enter an unguarded refresh.
+            time.sleep(0.02)
+            return response(200, {
+                "access_token": f"access-{number}",
+                "refresh_token": f"refresh-{number}",
+            }, url)
+        finally:
+            with counter_lock:
+                active -= 1
+
+    stub(client, "_http_post", post)
+    if guarded:
+        _guard_token_refresh(client)
+
+    def refresh():
+        start.wait(timeout=5)
+        client._refresh_session()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(refresh) for _ in range(4)]
+        for future in futures:
+            future.result(timeout=10)
+    assert peak == 1
+    assert attempts == ["refresh", "refresh-1", "refresh-2", "refresh-3"]
+    assert client._http_post is post
+    assert client.di_token == "access-4"
+    assert client.di_refresh_token == "refresh-4"
+    restored = Garmin().client
+    restored.load(str(store))
+    assert restored.di_token == "access-4"
+    assert restored.di_refresh_token == "refresh-4"
 
 
 # --- through the server -----------------------------------------------------------------
@@ -323,7 +409,7 @@ def test_temporary_refresh_failure_keeps_session(server, garmin, monkeypatch, fa
         return response(failure, {"error": "temporarily_unavailable"}, url)
 
     stub(garmin.client, "_http_post", post)
-    _serialize_token_refresh(garmin.client)
+    _guard_token_refresh(garmin.client)
     monkeypatch.setattr(mcp_server, "_api", garmin)
     # Avoid upstream retries so counts prove no stale-token retry or
     # second metric request occurs after the temporary refresh failure.
@@ -382,3 +468,40 @@ def test_cached_login_refresh_failure_never_falls_back_to_credentials(
     assert session.requests == []
     assert garmin.client.login is must_not_login
     assert garmin.client._http_post is post
+
+
+@pytest.mark.parametrize("failure", [429, 503])
+@pytest.mark.parametrize("credentials", [False, True])
+def test_upstream_cached_login_still_needs_fallback_guard(
+    garmin, tmp_path, failure, credentials,
+):
+    # Keep the refresh interceptor, omit only auth.login's cache guard.
+    # Upstream still catches the outage and either demands credentials or
+    # invokes credential login. This check should change when upstream does.
+    store = tmp_path / "tokens"
+    garmin.client.dump(str(store))
+    stub(garmin.client, "_token_expires_soon", lambda: True)
+    session = FakeGarminApi({})
+    stub(garmin.client, "_api_session", session)
+    attempts = refresh_answers(garmin, failure)
+    logins = []
+
+    def credential_login(*args, **kwargs):
+        logins.append(args)
+        raise GarminConnectAuthenticationError("credential fallback reached")
+
+    stub(garmin.client, "login", credential_login)
+    if credentials:
+        garmin.username, garmin.password = "owner@example.com", "secret"
+    _guard_token_refresh(garmin.client)
+    with pytest.raises(GarminConnectAuthenticationError) as error:
+        garmin.login(str(store))
+    assert str(error.value) == (
+        "credential fallback reached" if credentials else "Username and password are required"
+    )
+    assert logins == ([("owner@example.com", "secret")] if credentials else [])
+    assert attempts == ["refresh"]
+    assert session.requests == []
+    assert type(garmin.client.kcal_refresh_error) is (
+        GarminConnectTooManyRequestsError if failure == 429 else GarminRefreshUnavailable
+    )
