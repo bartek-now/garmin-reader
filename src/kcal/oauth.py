@@ -67,6 +67,10 @@ class KcalRefreshToken(RefreshToken):
     family: str
 
 
+class KcalAuthorizationCode(AuthorizationCode):
+    generation: int
+
+
 @dataclass
 class PendingAuthorization:
     """An /authorize request waiting for the owner to log in."""
@@ -74,6 +78,7 @@ class PendingAuthorization:
     client: OAuthClientInformationFull
     params: AuthorizationParams
     expires_at: float
+    generation: int
 
 
 def auth_settings(public_url: str) -> AuthSettings:
@@ -144,10 +149,40 @@ class KcalOAuthProvider:
                     subject TEXT
                 );
                 CREATE INDEX IF NOT EXISTS tokens_family ON tokens (family);
+                CREATE TABLE IF NOT EXISTS auth_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    owner TEXT,
+                    generation INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO auth_state (id) VALUES (1);
                 """
             )
         self._pending: dict[str, PendingAuthorization] = {}
-        self._codes: dict[str, AuthorizationCode] = {}
+        self._codes: dict[str, KcalAuthorizationCode] = {}
+        self._owner: str | None = None
+
+    def configure_owner(self, owner_id: int) -> None:
+        owner = str(owner_id)
+        # Explicit transactions coordinate with the revocation CLI's separate
+        # connection. sqlite's context manager commits or rolls back without
+        # rewriting exceptions (the SDK's TokenError is a frozen dataclass).
+        with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            previous = self._db.execute("SELECT owner FROM auth_state WHERE id = 1").fetchone()[0]
+            if previous is not None and previous != owner:
+                self._db.execute("DELETE FROM tokens")
+                self._db.execute("UPDATE auth_state SET generation = generation + 1 WHERE id = 1")
+            # Migrate existing databases, retaining only this owner's tokens.
+            self._db.execute("DELETE FROM tokens WHERE subject IS NULL OR subject != ?", (owner,))
+            self._db.execute("UPDATE auth_state SET owner = ? WHERE id = 1", (owner,))
+        self._owner = owner
+
+    def _generation(self) -> int | None:
+        with self._lock:
+            owner, generation = self._db.execute(
+                "SELECT owner, generation FROM auth_state WHERE id = 1"
+            ).fetchone()
+        return generation if self._owner is not None and owner == self._owner else None
 
     # --- clients ---------------------------------------------------------
 
@@ -181,6 +216,9 @@ class KcalOAuthProvider:
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
         """Park the request and send the owner's browser to /login."""
+        generation = self._generation()
+        if generation is None:
+            raise AuthorizeError("invalid_request", "The server's owner has changed; reconnect.")
         if params.resource is not None and not _same_resource(params.resource, self.resource):
             raise AuthorizeError(
                 "invalid_request", f"This server only issues tokens for {self.resource}"
@@ -193,19 +231,22 @@ class KcalOAuthProvider:
             del self._pending[min(self._pending, key=lambda k: self._pending[k].expires_at)]
         request_id = secrets.token_urlsafe(32)
         self._pending[request_id] = PendingAuthorization(
-            client=client, params=params, expires_at=now + PENDING_SECONDS
+            client=client, params=params, expires_at=now + PENDING_SECONDS,
+            generation=generation,
         )
         return f"{self.public_url}/login?req={request_id}"
 
     def pending(self, request_id: str) -> PendingAuthorization | None:
         """The waiting request, for the login page to show and complete."""
         p = self._pending.get(request_id)
-        return p if p is not None and p.expires_at > time.time() else None
+        return p if (p is not None and p.expires_at > time.time()
+                     and p.generation == self._generation()) else None
 
     def expired(self, request_id: str) -> PendingAuthorization | None:
         """A request that timed out recently (see return_to_client)."""
         p = self._pending.get(request_id)
-        return p if p is not None and p.expires_at <= time.time() else None
+        return p if (p is not None and (p.expires_at <= time.time()
+                                      or p.generation != self._generation())) else None
 
     def return_to_client(self, request_id: str) -> str | None:
         """For an expired request: the URL that sends the browser back to the
@@ -237,10 +278,13 @@ class KcalOAuthProvider:
         p = self._take_pending(request_id)
         if p is None:
             raise KeyError("Unknown or expired authorization request")
+        if subject != self._owner:
+            raise KeyError("Authorization belongs to a different owner")
         now = time.time()
         self._codes = {k: c for k, c in self._codes.items() if c.expires_at > now}
         code = secrets.token_urlsafe(32)
-        self._codes[code] = AuthorizationCode(
+        self._codes[code] = KcalAuthorizationCode(
+            generation=p.generation,
             code=code,
             scopes=p.params.scopes or [SCOPE],
             expires_at=now + CODE_SECONDS,
@@ -268,16 +312,18 @@ class KcalOAuthProvider:
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
         code = self._codes.get(authorization_code)
-        return code if code is not None and code.client_id == client.client_id else None
+        return code if (code is not None and code.client_id == client.client_id
+                        and code.generation == self._generation()) else None
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
         # Single use, enforced here rather than relying on the SDK's timing.
-        if self._codes.pop(authorization_code.code, None) is None:
+        code = self._codes.pop(authorization_code.code, None)
+        if code is None or code.client_id != client.client_id or code.expires_at <= time.time():
             raise TokenError("invalid_grant", "Authorization code already used")
         return self._issue(
-            client.client_id, authorization_code.scopes, authorization_code.subject
+            client.client_id, code.scopes, code.subject, generation=code.generation
         )
 
     # --- tokens --------------------------------------------------------------
@@ -303,16 +349,10 @@ class KcalOAuthProvider:
     ) -> OAuthToken:
         # Rotate: the old pair stops working, the old refresh token is kept
         # as used so a replay is caught, and the new pair joins the family.
-        with self._lock:
-            self._db.execute(
-                "DELETE FROM tokens WHERE family = ? AND kind = 'access'",
-                (refresh_token.family,),
-            )
-            self._db.execute(
-                "UPDATE tokens SET kind = 'used_refresh' WHERE token_hash = ?",
-                (_hash(refresh_token.token),),
-            )
-        return self._issue(client.client_id, scopes, refresh_token.subject, refresh_token.family)
+        return self._issue(
+            client.client_id, scopes, refresh_token.subject, refresh_token.family,
+            refresh_token=refresh_token,
+        )
 
     async def load_access_token(self, token: str) -> KcalAccessToken | None:
         row = self._load(token, ("access",))
@@ -328,17 +368,20 @@ class KcalOAuthProvider:
         """Sign every client out (clients stay registered). Returns how many
         authorizations ended.
         """
-        with self._lock:
+        with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
             (families,) = self._db.execute(
                 "SELECT COUNT(DISTINCT family) FROM tokens WHERE kind != 'used_refresh'"
             ).fetchone()
             self._db.execute("DELETE FROM tokens")
+            self._db.execute("UPDATE auth_state SET generation = generation + 1 WHERE id = 1")
         return families
 
     # --- storage -------------------------------------------------------------
 
     def _issue(
-        self, client_id: str, scopes: list[str], subject: str | None, family: str | None = None
+        self, client_id: str, scopes: list[str], subject: str | None, family: str | None = None,
+        *, generation: int | None = None, refresh_token: KcalRefreshToken | None = None,
     ) -> OAuthToken:
         now = int(time.time())
         family = family or secrets.token_urlsafe(16)
@@ -347,7 +390,30 @@ class KcalOAuthProvider:
             (_hash(access), "access", now + ACCESS_TOKEN_SECONDS),
             (_hash(refresh), "refresh", now + REFRESH_TOKEN_SECONDS),
         ]
-        with self._lock:
+        with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            owner, current_generation = self._db.execute(
+                "SELECT owner, generation FROM auth_state WHERE id = 1"
+            ).fetchone()
+            if self._owner is None or owner != self._owner or subject != owner:
+                raise TokenError("invalid_grant", "Authorization belongs to a different owner")
+            if generation is not None and generation != current_generation:
+                raise TokenError("invalid_grant", "Authorization was revoked")
+            if refresh_token is not None:
+                row = self._db.execute(
+                    "SELECT scopes FROM tokens WHERE token_hash = ? AND kind = 'refresh' "
+                    "AND client_id = ? AND family = ? AND subject = ? AND expires_at > ?",
+                    (_hash(refresh_token.token), client_id, family, owner, now),
+                ).fetchone()
+                if row is None:
+                    raise TokenError("invalid_grant", "Refresh token was revoked or used")
+                if not set(scopes) <= set(json.loads(row[0])):
+                    raise TokenError("invalid_scope", "Cannot expand refresh token scopes")
+                self._db.execute("DELETE FROM tokens WHERE family = ? AND kind = 'access'", (family,))
+                self._db.execute(
+                    "UPDATE tokens SET kind = 'used_refresh' WHERE token_hash = ?",
+                    (_hash(refresh_token.token),),
+                )
             self._db.execute("DELETE FROM tokens WHERE expires_at <= ?", (now,))
             self._db.executemany(
                 "INSERT INTO tokens (token_hash, kind, family, client_id, scopes, "
@@ -367,12 +433,15 @@ class KcalOAuthProvider:
         )
 
     def _load(self, token: str, kinds: tuple[str, ...]) -> dict | None:
+        if self._owner is None:
+            return None
         with self._lock:
             row = self._db.execute(
                 "SELECT kind, family, client_id, scopes, expires_at, resource, subject "
                 f"FROM tokens WHERE token_hash = ? AND kind IN ({','.join('?' * len(kinds))}) "
-                "AND expires_at > ?",
-                (_hash(token), *kinds, int(time.time())),
+                "AND expires_at > ? AND subject = ? "
+                "AND EXISTS (SELECT 1 FROM auth_state WHERE id = 1 AND owner = ?)",
+                (_hash(token), *kinds, int(time.time()), self._owner, self._owner),
             ).fetchone()
         if row is None:
             return None

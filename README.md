@@ -20,6 +20,8 @@ Each row of output covers one day:
 
 ## Setup
 
+Requires Python 3.12 or newer and garminconnect 0.3.6 or newer in the 0.3 series.
+
 ```
 python -m venv .venv
 .venv/Scripts/activate   # or `source .venv/bin/activate` on macOS/Linux
@@ -61,6 +63,10 @@ Date selection:
 pip install -e . pytest
 pytest
 ```
+
+Before upgrading garminconnect, follow the
+[Garmin library upgrade checklist](docs/garmin-library-upgrades.md). It lists
+the private hooks and library behavior kcal depends on, and the checks to run.
 
 ## MCP server
 
@@ -138,7 +144,11 @@ the tools answer with a link to the same page.
 4. Add `<tunnel URL>/mcp` as a connector. In claude.ai choose "Sign in now"
    and "Register automatically"; in ChatGPT choose OAuth.
 
-`kcal-mcp --revoke-all` signs every client out, even while the server runs.
+`kcal-mcp --revoke-all` signs every client out, even while the server runs,
+and invalidates waiting sign-ins and unexchanged authorization codes.
+Changing `KCAL_GARMIN_OWNER` also invalidates existing authorizations. The
+stored Garmin session must belong to the configured owner before tools can
+read any health data.
 
 | Setting | Flag | Default |
 |---|---|---|

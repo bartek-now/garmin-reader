@@ -21,6 +21,7 @@ import secrets
 import time
 from collections import deque
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -206,19 +207,20 @@ class LoginPage:
             return locked
         if not email or not password:
             return self._form(request, request_id, error="Enter your Garmin email and password.", email=email)
-        try:
-            api, needs_mfa = await self._attempt(self.garmin.start, email, password)
-        except Exception as err:
-            return self._failed(request, request_id, err, email)
-        if needs_mfa:
-            now = time.time()
-            self._mfa = {k: f for k, f in self._mfa.items() if f.expires_at > now}
-            while len(self._mfa) >= MAX_MFA_FLOWS:
-                del self._mfa[min(self._mfa, key=lambda k: self._mfa[k].expires_at)]
-            flow = secrets.token_urlsafe(32)
-            self._mfa[flow] = _MfaFlow(api, request_id, now + MFA_SECONDS)
-            return self._mfa_form(request, flow, request_id)
-        return await self._finish(request, api, request_id)
+        with self._attempt():
+            try:
+                api, needs_mfa = await anyio.to_thread.run_sync(self.garmin.start, email, password)
+            except Exception as err:
+                return self._failed(request, request_id, err, email)
+            if needs_mfa:
+                now = time.time()
+                self._mfa = {k: f for k, f in self._mfa.items() if f.expires_at > now}
+                while len(self._mfa) >= MAX_MFA_FLOWS:
+                    del self._mfa[min(self._mfa, key=lambda k: self._mfa[k].expires_at)]
+                flow = secrets.token_urlsafe(32)
+                self._mfa[flow] = _MfaFlow(api, request_id, now + MFA_SECONDS)
+                return self._mfa_form(request, flow, request_id)
+            return await self._finish(request, api, request_id)
 
     async def _mfa_step(self, request, flow_id, request_id, code) -> Response:
         flow = self._mfa.get(flow_id)
@@ -231,12 +233,13 @@ class LoginPage:
         if locked := self._locked(request, flow.request_id):
             return locked  # the code can still be entered once the pause ends
         del self._mfa[flow_id]
-        try:
-            await self._attempt(self.garmin.finish, flow.api, code.strip())
-        except Exception as err:
-            # Garmin's MFA state is single use: a wrong code means starting over.
-            return self._failed(request, flow.request_id, err, "")
-        return await self._finish(request, flow.api, flow.request_id)
+        with self._attempt():
+            try:
+                await anyio.to_thread.run_sync(self.garmin.finish, flow.api, code.strip())
+            except Exception as err:
+                # Garmin's MFA state is single use: a wrong code means starting over.
+                return self._failed(request, flow.request_id, err, "")
+            return await self._finish(request, flow.api, flow.request_id)
 
     async def _finish(self, request, api, request_id) -> Response:
         try:
@@ -283,11 +286,12 @@ class LoginPage:
 
     # --- failures ------------------------------------------------------------------
 
-    async def _attempt(self, fn, *args):
-        """Run a Garmin sign-in step in a worker thread, counted as in flight."""
+    @contextmanager
+    def _attempt(self):
+        """Reserve a slot until credential AND owner checks have finished."""
         self._in_flight += 1
         try:
-            return await anyio.to_thread.run_sync(fn, *args)
+            yield
         finally:
             self._in_flight -= 1
 

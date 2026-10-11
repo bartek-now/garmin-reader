@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from garminconnect import GarminConnectConnectionError
 
 from kcal import endpoints
 
@@ -61,6 +62,19 @@ def test_day_metrics_isolates_errors():
     assert out["sleep_data"] == {"date": "2026-10-05"}
     assert "boom" in out["hrv_data"]["error"]
     assert "Unknown metric" in out["bogus"]["error"]
+
+
+def test_unavailable_endpoint_does_not_look_like_refresh_failure():
+    class Api(FakeApi):
+        def get_hrv_data(self, cdate):
+            raise GarminConnectConnectionError("API Error 404: no HRV on this watch")
+
+    out = endpoints.day_metrics(Api(), "2026-10-05", ["hrv_data", "sleep_data"])
+    assert out == {
+        "date": "2026-10-05",
+        "hrv_data": {"error": "GarminConnectConnectionError: API Error 404: no HRV on this watch"},
+        "sleep_data": {"date": "2026-10-05"},
+    }
 
 
 def test_default_day_metrics_are_valid():

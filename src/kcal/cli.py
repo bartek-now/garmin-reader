@@ -57,9 +57,9 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     output = _render_csv(stats)
 
     if args.output:
-        Path(args.output).write_text(output, encoding="utf-8")
+        Path(args.output).write_text(output, encoding="utf-8", newline="")
     else:
-        print(output)
+        print(output, end="")
     return 0
 
 

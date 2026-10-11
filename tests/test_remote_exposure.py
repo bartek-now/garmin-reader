@@ -33,6 +33,7 @@ LOCATED = {
     "activityName": "Poznan Running",
     "description": "Easy loop round the lake",
     "courseName": "Lake loop",
+    "workoutName": "Run from 123 Home Street",
     "ownerDisplayName": "jdoe",
     "ownerProfileImageUrlLarge": "https://img.example/1.png",
     "userInfoDto": {"fullname": "Jane Doe", "displayname": "jdoe"},
@@ -202,6 +203,16 @@ def test_strip_private_leaves_other_data_alone():
 def test_remote_results_are_stripped(api, remote):
     out = call(remote, "call_garmin_endpoint", {"endpoint": "get_activity", "args": {"activity_id": "1"}})
     assert out == endpoints.strip_private(LOCATED)
+
+
+@pytest.mark.parametrize("endpoint, args", [
+    ("get_workout_by_id", {"workout_id": 1}), ("get_workouts", {}),
+])
+def test_remote_workout_names_do_not_expose_places(api, remote, endpoint, args):
+    out = call(remote, "call_garmin_endpoint", {"endpoint": endpoint, "args": args})
+    assert api.calls == [endpoint]
+    assert out == {"activityId": 1, "summaryDTO": {"calories": 500.0},
+                   "lapDTOs": [{"distance": 1000}]}
 
 
 def test_remote_day_results_are_stripped(api, remote):

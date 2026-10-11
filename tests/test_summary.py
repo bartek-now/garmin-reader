@@ -2,6 +2,7 @@
 
 import contextvars
 import threading
+from garminconnect import GarminConnectConnectionError
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -176,7 +177,9 @@ def test_readiness_prefers_the_morning_assessment(api):
     _, rows = table(api, ["readiness"])
     assert rows[str(D3)]["readiness_score"] == 61  # AFTER_WAKEUP_RESET, not the later 40
     assert rows[str(D3)]["acute_training_load"] == 184
+    assert rows[str(D3)]["recovery_time_minutes"] == 1
     assert rows[str(D2)]["readiness_score"] == 50  # no morning one: the earliest
+    assert rows[str(D2)]["recovery_time_minutes"] is None
 
 
 # --- the table -----------------------------------------------------------------------
@@ -311,17 +314,18 @@ def test_days_without_data_are_not_zeros(api):
     assert rows[str(D2)]["steps"] == 10000
 
 
-def test_failing_group_reports_its_error_and_others_still_come_back(api):
+@pytest.mark.parametrize("error", [RuntimeError, GarminConnectConnectionError])
+def test_failing_group_reports_its_error_and_others_still_come_back(api, error):
     original = api.connectapi
 
     def no_hrv(path):
         if path.startswith("/hrv-service/"):
-            raise RuntimeError("404 no HRV on this watch")
+            raise error("404 no HRV on this watch")
         return original(path)
 
     api.connectapi = no_hrv
     out = summary.summarize(api, [D1, D2, D3], ["weight", "hrv", "sleep"])
-    assert out["errors"] == {"hrv": "RuntimeError: 404 no HRV on this watch"}
+    assert out["errors"] == {"hrv": f"{error.__name__}: 404 no HRV on this watch"}
     assert "weight_kg" in out["fields"] and "sleep_score" in out["fields"]
     assert not any(f.startswith("hrv_") for f in out["fields"])
 
@@ -385,6 +389,31 @@ def test_a_failed_day_stops_the_rest(api):
     with pytest.raises(GarminConnectAuthenticationError):
         summary.summarize(api, days, ["activity"])
     assert len(asked) < 15  # the queued days were cancelled, not all sent
+
+
+@pytest.mark.parametrize("method, groups", [
+    ("connectapi", ["hrv", "sleep"]),
+    ("get_user_summary", ["heart", "stress", "lifestyle"]),
+    ("get_lifestyle_logging_data", ["lifestyle"]),
+])
+def test_refresh_outage_stops_each_summary_fetch_path(api, monkeypatch, method, groups):
+    from kcal.auth import GarminRefreshUnavailable
+
+    cause = GarminRefreshUnavailable("refresh service unavailable")
+    error = GarminConnectConnectionError("wrapped by Garmin")
+    attempts = []
+
+    def fail(*args):
+        attempts.append(args)
+        raise error from cause
+
+    monkeypatch.setattr(api, method, fail)
+    with pytest.raises(GarminConnectConnectionError) as raised:
+        summary.summarize(api, [D1, D2, D3], groups)
+    assert raised.value is error
+    assert raised.value.__cause__ is cause
+    assert len(attempts) == 1
+    assert api.calls == []  # no other group or subsequent day was fetched
 
 
 def test_empty_range_has_the_usual_shape(api):

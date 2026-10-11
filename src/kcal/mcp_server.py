@@ -35,7 +35,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
 from kcal import endpoints, summary
-from kcal.auth import GarminLoginError, login
+from kcal.auth import GarminLoginError, garmin_profile_id, is_refresh_unavailable, login
 from kcal.daily import resolve_days
 from kcal.http_log import LogClientErrors
 from kcal.login_page import LoginPage
@@ -54,6 +54,7 @@ class _Exposure:
     scrub: Callable[[Any], Any]
     # Where the owner refreshes an expired Garmin session (HTTP with OAuth).
     login_url: str | None = None
+    owner_id: int | None = None
 
 
 LOCAL = _Exposure(allowed=None, scrub=lambda result: result)
@@ -89,6 +90,7 @@ _LOADED_COMMIT = _git_commit()
 _STARTED = datetime.now().astimezone().isoformat(timespec="seconds")
 
 _api = None
+_verified_api: tuple[Any, int] | None = None
 _api_lock = threading.Lock()
 
 
@@ -96,23 +98,44 @@ def _get_api():
     """Log in once per server process and reuse the session. Tools run in
     worker threads, so concurrent first calls must not both log in.
     """
-    global _api
+    global _api, _verified_api
     with _api_lock:
         if _api is None:
             try:
                 _api = login(prompt_mfa=_no_mfa)
             except Exception as err:
                 raise _login_error(err) from err
-    return _api
+        owner = _exposure.get().owner_id
+        if owner is not None and (_verified_api is None
+                                  or _verified_api[0] is not _api
+                                  or _verified_api[1] != owner):
+            try:
+                actual_owner = garmin_profile_id(_api)
+            except GarminConnectAuthenticationError as err:
+                _api = None
+                _verified_api = None
+                raise _login_error(err) from err
+            except Exception as err:
+                raise _login_error(err) from err
+            if actual_owner != owner:
+                _api = None
+                _verified_api = None
+                raise GarminLoginError(
+                    "The stored Garmin session belongs to a different account. "
+                    f"Open {_exposure.get().login_url} and sign in as this server's owner."
+                )
+            _verified_api = (_api, owner)
+        return _api
 
 
 def _reset_api() -> None:
     """Forget the cached Garmin session (new tokens were saved, or Garmin
     rejected the current ones); the next call logs in again.
     """
-    global _api
+    global _api, _verified_api
     with _api_lock:
         _api = None
+        _verified_api = None
 
 
 def _login_error(err: Exception) -> GarminLoginError:
@@ -205,8 +228,10 @@ def _wrap(fn, exposure: _Exposure):
             # Garmin rejected the session mid-call (expired or revoked).
             _reset_api()
             raise _login_error(err) from err
-        except GarminConnectTooManyRequestsError as err:
-            # Garmin rate-limited a request mid-call; the session is fine.
+        except (GarminConnectTooManyRequestsError, GarminConnectConnectionError) as err:
+            if isinstance(err, GarminConnectConnectionError) and not is_refresh_unavailable(err):
+                raise
+            # A temporary refresh failure doesn't invalidate the session.
             raise RuntimeError(GARMIN_BUSY_MESSAGE) from err
         finally:
             _exposure.reset(token)
@@ -355,6 +380,7 @@ def build_server(
     if oauth is not None:
         if http is None or http.garmin_owner is None:
             raise ValueError("OAuth needs HTTP settings with the public URL and Garmin owner")
+        oauth.configure_owner(http.garmin_owner)
         kwargs.update(auth_server_provider=oauth, auth=auth_settings(http.public_url))
     server = FastMCP("kcal", **kwargs)
     if http is not None:
@@ -366,7 +392,7 @@ def build_server(
             secure_cookie=http.public_url.startswith("https://"),
         )
         server.custom_route("/login", methods=["GET", "POST"])(page.handle)
-        exposure = replace(REMOTE, login_url=f"{http.public_url}/login")
+        exposure = replace(REMOTE, login_url=f"{http.public_url}/login", owner_id=http.garmin_owner)
     for fn in _TOOLS:
         tool = _wrap(fn, exposure)
         if customize := getattr(fn, "customize", None):

@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -397,6 +398,13 @@ class ExpiredSession:
 
     FIRST_DAY = "2026-10-03"
 
+    @property
+    def client(self):
+        def profile(path):
+            assert path == "/userprofile-service/socialProfile"
+            return {"profileId": OWNER}
+        return SimpleNamespace(connectapi=profile)
+
     def _rejected(self, *args, **kwargs):
         raise GarminConnectAuthenticationError("401 Unauthorized")
 
@@ -768,6 +776,14 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
         def __init__(self, generation):
             self.generation = generation
 
+        @property
+        def client(self):
+            def profile(path):
+                assert path == "/userprofile-service/socialProfile"
+                self.get_sleep_data("profile-check")
+                return {"profileId": OWNER}
+            return SimpleNamespace(connectapi=profile)
+
         def get_sleep_data(self, cdate):
             if self.generation != garmin_side["generation"]:
                 raise GarminConnectAuthenticationError("401 Unauthorized")
@@ -816,3 +832,55 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
     # 5. Asking again works, with the same client token: no reconnecting.
     is_error, text = mcp_tool_call(client, tokens["access_token"], "get_garmin_day", ask)
     assert not is_error and json.loads(text)["sleep_data"]["dailySleepDTO"]["calendarDate"] == "2026-10-05"
+
+
+@pytest.mark.parametrize("mfa", [False, True])
+def test_slow_owner_checks_still_reserve_attempt_slots(garmin, provider, state, mfa):
+    import queue
+    import threading
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    garmin.accounts = {**garmin.accounts, "other-mfa@example.com": (PASSWORD, 999, "123456")}
+    release = threading.Event()
+    entered = queue.Queue()
+    original = garmin.profile_id
+
+    def slow_profile(session):
+        entered.put(True)
+        assert release.wait(10), "test did not release profile lookup"
+        return original(session)
+
+    garmin.profile_id = slow_profile
+    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PUBLIC,
+                                     cookies={login_page.CSRF_COOKIE: "t"}) as c:
+            submissions = []
+            for _ in range(login_page.MAX_FAILURES + 1):
+                data = {"csrf": "t", "email": "other@example.com", "password": PASSWORD}
+                if mfa:
+                    r = await c.post("/login", data={**data, "email": "other-mfa@example.com"})
+                    assert r.status_code == 200
+                    data = {"csrf": "t", "action": "mfa", "flow": flow_id(r.text), "code": "123456"}
+                submissions.append(data)
+            tasks = [asyncio.create_task(c.post("/login", data=data)) for data in submissions[:-1]]
+            try:
+                for _ in tasks:
+                    await asyncio.wait_for(asyncio.to_thread(entered.get, True, 5), timeout=6)
+                assert page._in_flight == login_page.MAX_FAILURES
+                blocked = await c.post("/login", data=submissions[-1])
+                assert blocked.status_code == 429
+            finally:
+                release.set()
+                responses = await asyncio.gather(*tasks)
+            assert all(r.status_code == 200 and "isn't the one" in r.text for r in responses)
+            assert page._in_flight == 0
+            assert len(page._failures) == login_page.MAX_FAILURES
+            assert not (state / "garmin_tokens").exists()
+            assert len([x for x in garmin.calls if x[0] == ("finish" if mfa else "start")]) == login_page.MAX_FAILURES
+
+    asyncio.run(run())
