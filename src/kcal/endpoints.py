@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+from datetime import date, datetime
 from collections.abc import Collection
 from typing import Any
 
@@ -38,6 +39,13 @@ DEFAULT_DAY_METRICS = [
 # Clients truncate tool results well below this (Claude Desktop somewhere
 # between 50k and 68k chars), so stay under the lowest one seen.
 MAX_RESULT_CHARS = 50_000
+# Getters taking a date range can make one Garmin request per part of it
+# (get_sleep_daily: one per 28 days; get_activities_by_date: one per page),
+# so the span is checked before they're called: the result-size cap only
+# applies once every request has been made. Same limit as get_garmin_summary.
+MAX_RANGE_DAYS = 366
+# (start, end) parameter names garminconnect uses for date ranges.
+_RANGE_PARAMS = (("start", "end"), ("startdate", "enddate"), ("fromdate", "todate"))
 # Lists longer than this are intraday series (per-minute movement, HRV
 # readings, ...); the default day summary drops them and keeps scalars.
 SUMMARY_MAX_LIST = 20
@@ -68,6 +76,8 @@ REMOTE_ALLOWED = frozenset({
     "activity_types",
     # Workouts (planned templates and the schedule)
     "workouts", "workout_by_id", "scheduled_workouts",
+    # Ranges (used by get_garmin_summary)
+    "hrv_data_range", "sleep_daily",
     # Nutrition
     "nutrition_daily_food_log", "nutrition_daily_meals",
     "nutrition_daily_settings", "lifestyle_logging_data",
@@ -141,10 +151,41 @@ def call_endpoint(
             "Use list_garmin_endpoints to see what is available."
         )
     try:
-        inspect.signature(getters[endpoint]).bind(api, **(args or {}))
+        bound = inspect.signature(getters[endpoint]).bind(api, **(args or {}))
     except TypeError as err:
         raise ValueError(f"Bad arguments for {endpoint}: {err}") from err
+    _check_span(endpoint, getters[endpoint], bound.arguments)
     return getattr(api, endpoint)(**(args or {}))
+
+
+def _check_span(endpoint: str, fn, arguments: dict) -> None:
+    """Refuse a date range longer than MAX_RANGE_DAYS. Only getters with both
+    halves of a pair count: a lone `start` is a paging offset (get_goals,
+    get_workouts, ...). A missing end means today, as for the getters that
+    default it ("from 1900" is the whole history).
+    """
+    params = inspect.signature(fn).parameters
+    for start_name, end_name in _RANGE_PARAMS:
+        if start_name not in params or end_name not in params:
+            continue
+        if arguments.get(start_name) is None:
+            continue  # optional range left out (e.g. get_race_predictions)
+        start = _date_arg(endpoint, start_name, arguments[start_name])
+        end_value = arguments.get(end_name)
+        end = _date_arg(endpoint, end_name, end_value) if end_value else date.today()
+        days = (end - start).days + 1
+        if days > MAX_RANGE_DAYS:
+            raise ValueError(
+                f"{endpoint}: the range is {days} days; at most {MAX_RANGE_DAYS} can be "
+                "requested at once. Split it into smaller ranges."
+            )
+
+
+def _date_arg(endpoint: str, name: str, value) -> date:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"{endpoint}: {name} must be a date, YYYY-MM-DD: {value!r}") from None
 
 
 def to_json(value: Any) -> str:

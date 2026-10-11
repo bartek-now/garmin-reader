@@ -233,11 +233,12 @@ kept. Elevation and time zone are left in: they're coarse.
 The allowlist lives in `endpoints.py` as one explicit set, so new
 `garminconnect` getters are blocked remotely until added on purpose.
 
-Besides getters, `get_garmin_summary` uses three Garmin range endpoints that
-`garminconnect` doesn't wrap (HRV, sleep statistics and training readiness
-for a date range). Remotely, raw requests are allowed only for those, with
-the whole path matched (`summary.RANGE_PATHS`: the endpoint followed by two
-dates), so nothing else is reachable that way. `get_garmin_day`'s `metrics`
+`get_garmin_summary` reads HRV and sleep for a date range through
+garminconnect's range getters (`get_hrv_data_range`, `get_sleep_daily`),
+which are on the allowlist. Training readiness for a range has no getter, so
+it is the one raw request: remotely, raw requests are allowed only for that
+endpoint, with the whole path matched (`summary.RANGE_PATHS`: the endpoint
+followed by two dates), so nothing else is reachable that way. `get_garmin_day`'s `metrics`
 schema lists only the allowlisted single-day endpoints, so other names are
 refused before any code runs.
 

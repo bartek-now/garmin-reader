@@ -409,6 +409,7 @@ class ExpiredSession:
         raise GarminConnectAuthenticationError("401 Unauthorized")
 
     get_sleep_data = get_hrv_data = get_activities_by_date = connectapi = _rejected
+    get_hrv_data_range = get_sleep_daily = _rejected
 
     def get_user_summary(self, cdate):
         if cdate == self.FIRST_DAY:

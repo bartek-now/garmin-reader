@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import date, timedelta
 
 import pytest
 import requests
@@ -505,3 +506,74 @@ def test_upstream_cached_login_still_needs_fallback_guard(
     assert type(garmin.client.kcal_refresh_error) is (
         GarminConnectTooManyRequestsError if failure == 429 else GarminRefreshUnavailable
     )
+
+
+# --- the range getters get_garmin_summary relies on --------------------------------
+
+
+def sleep_score(night: date) -> int:
+    """A score unique to each night of the test ranges."""
+    return night.timetuple().tm_yday
+
+
+class FakeRangeApi:
+    """Answers Garmin's range endpoints by path, recording each path asked."""
+
+    def __init__(self):
+        self.paths = []
+
+    def request(self, method, url, headers=None, **kwargs):
+        path = "/" + url.split("://", 1)[1].split("/", 1)[1]
+        self.paths.append(path)
+        if path.startswith("/sleep-service/stats/sleep/daily/"):
+            start, end = (date.fromisoformat(d) for d in path.rsplit("/", 2)[-2:])
+            nights = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+            # Every night of the chunk, each with its own score, plus the
+            # chunk's first night again: merging must de-duplicate.
+            body = {"individualStats": [
+                {"calendarDate": d.isoformat(), "values": {"sleepScore": sleep_score(d)}}
+                for d in nights + nights[:1]
+            ]}
+            return response(200, body, url)
+        if path.startswith("/hrv-service/hrv/daily/"):
+            return response(200, {"hrvSummaries": [{"calendarDate": "2026-09-29", "lastNightAvg": 41}]}, url)
+        return response(404, {}, url)
+
+
+def test_sleep_daily_chunks_28_days_and_merges(garmin):
+    session = FakeRangeApi()
+    stub(garmin.client, "_api_session", session)
+    nights = garmin.get_sleep_daily("2026-08-01", "2026-09-29")  # 60 days
+    assert session.paths == [
+        "/sleep-service/stats/sleep/daily/2026-08-01/2026-08-28",
+        "/sleep-service/stats/sleep/daily/2026-08-29/2026-09-25",
+        "/sleep-service/stats/sleep/daily/2026-09-26/2026-09-29",
+    ]
+    # Every night of every chunk, once, oldest first, each with its own score.
+    expected = [date(2026, 8, 1) + timedelta(days=i) for i in range(60)]
+    assert [n["calendarDate"] for n in nights] == [d.isoformat() for d in expected]
+    assert [n["values"]["sleepScore"] for n in nights] == [sleep_score(d) for d in expected]
+
+
+def test_hrv_data_range_is_one_request_returning_summaries(garmin):
+    session = FakeRangeApi()
+    stub(garmin.client, "_api_session", session)
+    out = garmin.get_hrv_data_range("2025-10-01", "2026-09-30")
+    assert session.paths == ["/hrv-service/hrv/daily/2025-10-01/2026-09-30"]
+    assert out["hrvSummaries"][0]["lastNightAvg"] == 41
+
+
+def test_summary_reads_the_real_getters_output(garmin):
+    from kcal import summary
+
+    stub(garmin.client, "_api_session", FakeRangeApi())
+    days = [date(2026, 8, 1) + timedelta(days=i) for i in range(60)]
+    out = summary.summarize(garmin, days, ["sleep", "hrv"])
+    fields, rows = out["fields"], {r[0]: dict(zip(out["fields"], r)) for r in out["days"]}
+    assert "errors" not in out
+    # Every night, including both sides of each 28-day chunk boundary.
+    assert {day: row["sleep_score"] for day, row in rows.items()} == {
+        d.isoformat(): sleep_score(d) for d in days
+    }
+    assert rows["2026-09-29"]["hrv_last_night_ms"] == 41
+    assert {"sleep_score", "hrv_last_night_ms"} <= set(fields)

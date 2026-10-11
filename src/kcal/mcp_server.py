@@ -189,8 +189,9 @@ class _Garmin:
 
 
 def _range_endpoint_only(path: str, **kwargs):
-    """Remotely, raw requests are allowed only for the range endpoints
-    get_garmin_summary uses, matched in full.
+    """Remotely, raw requests are allowed only for the training-readiness
+    range get_garmin_summary uses (it has no garminconnect getter), matched
+    in full.
     """
     if not summary.RANGE_PATHS.fullmatch(path) or kwargs:
         raise ValueError(f"Garmin path {path!r} is not available remotely.")
