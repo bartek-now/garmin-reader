@@ -3,10 +3,11 @@
 Deploys kcal to a Google Cloud e2-micro VM (free tier), or updates it.
 
 .DESCRIPTION
-Creates whatever is missing (static IP, firewall rule, VM), then runs
+Creates whatever is missing (static IP, firewall rules, VM), then runs
 setup-vm.sh on the VM, which builds the code from GitHub and restarts.
-Run it again to deploy a newer commit. See docs/deployment.md,
-"Google Cloud VM".
+Run it again to deploy a newer commit. Use a project dedicated to kcal:
+this removes the default network's rules that open SSH, RDP and ping to
+the internet. See docs/deployment.md, "Google Cloud VM".
 
 .EXAMPLE
 .\deploy\gcp\deploy.ps1 -Domain garminmcp.example.com -GarminOwner 1234567
@@ -33,6 +34,10 @@ $Region = $Zone -replace '-[a-z]$', ''
 $Vm = 'kcal-mcp'
 $Address = 'kcal-mcp-ip'
 $Firewall = 'kcal-mcp-web'
+$SshFirewall = 'kcal-mcp-ssh-iap'
+# Google's Identity-Aware Proxy, which SSH goes through, after checking
+# the caller's Google sign-in.
+$IapRange = '35.235.240.0/20'
 $Tag = 'kcal-mcp'
 $ProjectArgs = if ($Project) { @('--project', $Project) } else { @() }
 
@@ -50,22 +55,36 @@ function Test-GCloud {
     return $LASTEXITCODE -eq 0
 }
 
-$SshArgs = @('--zone', $Zone, '--strict-host-key-checking=no')
+$SshArgs = @('--zone', $Zone, '--strict-host-key-checking=no', '--tunnel-through-iap')
 
 $CurrentProject = if ($Project) { $Project } else { (& gcloud config get-value project 2>$null) }
 Write-Host "Project: $CurrentProject, zone: $Zone"
-Invoke-GCloud services enable compute.googleapis.com
+Invoke-GCloud services enable compute.googleapis.com iap.googleapis.com
 
 if (-not (Test-GCloud compute addresses describe $Address --region $Region)) {
     Invoke-GCloud compute addresses create $Address --region $Region
 }
 $Ip = Invoke-GCloud compute addresses describe $Address --region $Region '--format=value(address)'
 
-# HTTPS (and HTTP for certificate checks) to the VM only. SSH comes from
-# the default network's own rule.
+# HTTPS (and HTTP for certificate checks) from anywhere: the owner signs
+# in from any network, and Let's Encrypt's checks come from unpublished
+# addresses. Caddy refuses requests for any other hostname.
 if (-not (Test-GCloud compute firewall-rules describe $Firewall)) {
     Invoke-GCloud compute firewall-rules create $Firewall --network default `
         --allow 'tcp:80,tcp:443,udp:443' --target-tags $Tag --source-ranges 0.0.0.0/0
+}
+# SSH only through Identity-Aware Proxy...
+if (-not (Test-GCloud compute firewall-rules describe $SshFirewall)) {
+    Invoke-GCloud compute firewall-rules create $SshFirewall --network default `
+        --allow 'tcp:22' --target-tags $Tag --source-ranges $IapRange
+}
+# ...so the default network's rules opening SSH, RDP and ping to the
+# internet go.
+foreach ($rule in 'default-allow-ssh', 'default-allow-rdp', 'default-allow-icmp') {
+    if (Test-GCloud compute firewall-rules describe $rule) {
+        Write-Host "Removing firewall rule $rule"
+        Invoke-GCloud compute firewall-rules delete $rule
+    }
 }
 
 if (-not (Test-GCloud compute instances describe $Vm --zone $Zone)) {
@@ -94,7 +113,15 @@ try {
     Remove-Item $Setup -ErrorAction SilentlyContinue
 }
 # The arguments were validated above, so they need no quoting on the VM.
-Invoke-GCloud compute ssh $Vm @SshArgs --command "bash /tmp/kcal-setup-vm.sh $Domain $GarminOwner $Ref"
+# SSH through IAP occasionally drops at the end; setup-vm.sh is safe to
+# run again, so retry once.
+$SetupCommand = "bash /tmp/kcal-setup-vm.sh $Domain $GarminOwner $Ref"
+try {
+    Invoke-GCloud compute ssh $Vm @SshArgs --command $SetupCommand
+} catch {
+    Write-Host "Setup failed ($($_.Exception.Message)); trying once more."
+    Invoke-GCloud compute ssh $Vm @SshArgs --command $SetupCommand
+}
 
 Write-Host @"
 

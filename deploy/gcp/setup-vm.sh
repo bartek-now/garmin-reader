@@ -49,9 +49,10 @@ sudo install -m 600 /dev/null "$DIR/deploy/gcp/.env"
 printf 'KCAL_DOMAIN=%s\nKCAL_GARMIN_OWNER=%s\n' "$DOMAIN" "$OWNER" | sudo tee "$DIR/deploy/gcp/.env" >/dev/null
 
 cd "$DIR/deploy/gcp"
-sudo docker compose up -d --build --remove-orphans
-# Caddy reads its Caddyfile only when it starts, and Compose doesn't restart
-# it for a changed file, so restart it in case the Caddyfile changed.
-sudo docker compose up -d --force-recreate --no-deps caddy
+# Recreate both containers every time: Compose doesn't reliably notice a
+# rebuilt image (with Docker's containerd image store every build gets a
+# new ID), nor a changed Caddyfile, which Caddy reads only when it starts.
+# Sign-ins in progress are lost, as with any restart.
+sudo docker compose up -d --build --force-recreate --remove-orphans
 sudo docker image prune -f >/dev/null
 sudo docker compose ps
