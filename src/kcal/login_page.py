@@ -1,17 +1,19 @@
-"""The /login page: the owner proves who they are by logging in to Garmin
+"""The /login page: a user proves who they are by logging in to Garmin
 (docs/http-server-design.md, sections 2 and 3).
 
 Two ways in, one form:
 
 - From /authorize (`/login?req=<id>`): after the Garmin login it completes
-  the OAuth flow and sends the browser back to the client.
+  the OAuth flow for that user and sends the browser back to the client.
 - Opened directly (the link in the "Garmin session expired" tool error): it
-  only refreshes the stored Garmin tokens.
+  only refreshes that user's stored Garmin tokens.
 
-Either way, only the configured owner's Garmin account gets through. The
-password lives only in the request handler's memory; it is never logged,
-stored or echoed back. Failed attempts reach Garmin, which can lock the
-account, so they are capped for the whole server.
+Either way, only emails on the server's allowlist get through, checked
+before Garmin is contacted; Garmin accepting the password proves the
+person owns that account. Each user's Garmin session is stored apart from
+everyone else's. The password lives only in the request handler's memory;
+it is never logged, stored or echoed back. Failed attempts reach Garmin,
+which can lock the account, so they are capped per email.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import html
 import secrets
+import shutil
 import time
 from collections import deque
 from collections.abc import Callable
@@ -40,10 +43,12 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from kcal.auth import garmin_profile_id
 from kcal.oauth import KcalOAuthProvider
+from kcal.settings import normalize_email
 
-# Failed attempts (wrong password or MFA code, wrong account, Garmin
-# refusing) allowed per window, for everyone together: through the tunnel
-# every request comes from 127.0.0.1, so per-IP limits mean nothing.
+# Failed attempts (wrong password or MFA code, Garmin refusing) allowed per
+# window, per email: each email is one Garmin account Garmin could lock.
+# Behind a proxy or tunnel requests may all come from one address, so
+# per-IP limits would mean nothing.
 MAX_FAILURES = 5
 FAILURE_WINDOW_SECONDS = 60 * 60
 # How long the MFA step may take, and how many can be in progress.
@@ -104,9 +109,9 @@ class GarminGateway:
 
     def mfa_pending(self, api: Any) -> bool:
         """Whether Garmin still holds the verification step open. garminconnect
-        0.3.17 keeps it after a wrong (or rate-limited) code, so the owner can
+        0.3.17 keeps it after a wrong (or rate-limited) code, so the user can
         retype the code. If the flag ever disappears, this says no and the
-        owner starts over, as before.
+        user starts over, as before.
         """
         return bool(getattr(api.client, "_mfa_pending", False))
 
@@ -183,6 +188,7 @@ def _no_answer_status(status: int) -> bool:
 @dataclass
 class _MfaFlow:
     api: Any
+    email: str
     request_id: str | None
     expires_at: float
     # One code at a time reaches Garmin for this step.
@@ -208,24 +214,21 @@ class LoginPage:
     def __init__(
         self,
         oauth: KcalOAuthProvider,
-        owner_id: int,
-        token_store: Path,
-        on_login: Callable[[], None],
+        token_store: Callable[[int], Path],
         garmin: GarminGateway | None = None,
         secure_cookie: bool = True,
     ):
         self.oauth = oauth
-        self.owner_id = owner_id
-        self.token_store = token_store
-        self.on_login = on_login  # new Garmin tokens saved: drop any cached session
+        self.token_store = token_store  # a Garmin profile's own session store
         self.garmin = garmin or GarminGateway()
         # False only for an http://localhost public URL, where browsers may
         # drop Secure cookies.
         self.secure_cookie = secure_cookie
-        self._failures: deque[float] = deque()
-        # Garmin sign-ins still running count toward the cap, so parallel
-        # requests can't all pass the check before any failure is recorded.
-        self._in_flight = 0
+        # Per email: failures within the window, and Garmin sign-ins still
+        # running, which count toward the cap so parallel requests can't all
+        # pass the check before any failure is recorded.
+        self._failures: dict[str, deque[float]] = {}
+        self._in_flight: dict[str, int] = {}
         self._mfa: dict[str, _MfaFlow] = {}
         self._submissions: dict[str, _Submission] = {}
 
@@ -326,24 +329,33 @@ class LoginPage:
     async def _signin(self, request, request_id, email, password) -> Response:
         if request_id is not None and self.oauth.pending(request_id) is None:
             return self._expired_request(request, request_id)
-        if locked := self._locked(request, request_id):
-            return locked
-        if not email or not password:
+        user = normalize_email(email)
+        if not user or not password:
             return self._form(request, request_id, error="Enter your Garmin email and password.", email=email)
-        with self._attempt():
+        if not self.oauth.is_allowed(user):
+            # Refused before Garmin is contacted: nothing to count or lock.
+            return self._form(
+                request, request_id, email=email,
+                error="That email isn't allowed to use this server.",
+            )
+        if locked := self._locked(request, request_id, user):
+            return locked
+        with self._attempt(user):
             try:
-                api, needs_mfa = await anyio.to_thread.run_sync(self.garmin.start, email, password)
+                api, needs_mfa = await anyio.to_thread.run_sync(self.garmin.start, user, password)
             except Exception as err:
-                return self._failed(request, request_id, err, email)
+                return self._form(
+                    request, request_id, error=self._record_failure(err, user), email=email
+                )
             if needs_mfa:
                 now = time.time()
                 self._mfa = {k: f for k, f in self._mfa.items() if f.expires_at > now}
                 while len(self._mfa) >= MAX_MFA_FLOWS:
                     del self._mfa[min(self._mfa, key=lambda k: self._mfa[k].expires_at)]
                 flow = secrets.token_urlsafe(32)
-                self._mfa[flow] = _MfaFlow(api, request_id, now + MFA_SECONDS)
+                self._mfa[flow] = _MfaFlow(api, user, request_id, now + MFA_SECONDS)
                 return self._mfa_form(request, flow, request_id)
-            return await self._finish(request, api, request_id)
+            return await self._finish(request, api, user, request_id)
 
     async def _mfa_step(self, request, flow_id, request_id, code) -> Response:
         flow = self._mfa.get(flow_id)
@@ -366,15 +378,15 @@ class LoginPage:
                     request, "Sign-in expired",
                     "The verification step expired or was already used.", request_id,
                 )
-            if locked := self._locked(request, flow.request_id):
+            if locked := self._locked(request, flow.request_id, flow.email):
                 return locked  # the code can still be entered once the pause ends
-            with self._attempt():
+            with self._attempt(flow.email):
                 try:
                     await anyio.to_thread.run_sync(self.garmin.finish, flow.api, code.strip())
                 except Exception as err:
-                    message = self._record_failure(err, what="code")
+                    message = self._record_failure(err, flow.email, what="code")
                     if self.garmin.mfa_pending(flow.api):
-                        # Garmin keeps the step open: let the owner retype the code.
+                        # Garmin keeps the step open: let the user retype the code.
                         retry = self._mfa_form(request, flow_id, flow.request_id, error=message)
                         if isinstance(err, (GarminConnectConnectionError,
                                             GarminConnectTooManyRequestsError)):
@@ -384,23 +396,20 @@ class LoginPage:
                     # Another submission may have removed it meanwhile (expiry).
                     self._mfa.pop(flow_id, None)
                     return self._form(request, flow.request_id, error=message)
-                response = await self._finish(request, flow.api, flow.request_id)
+                response = await self._finish(request, flow.api, flow.email, flow.request_id)
                 flow.completed = self._snapshot(response)
                 return response
 
-    async def _finish(self, request, api, request_id) -> Response:
+    async def _finish(self, request, api, user, request_id) -> Response:
+        """`user` (an allowed email) signed in to Garmin: keep the session
+        as theirs, then finish the connection request if there is one.
+        """
         try:
             profile_id = await anyio.to_thread.run_sync(self.garmin.profile_id, api)
         except Exception as err:
-            return self._failed(request, request_id, err, "")
-        if profile_id != self.owner_id:
-            self._failures.append(time.time())
-            return self._form(
-                request, request_id,
-                error="That Garmin account isn't the one this server belongs to.",
-            )
+            return self._form(request, request_id, error=self._record_failure(err, user))
         try:
-            await anyio.to_thread.run_sync(self.garmin.save, api, self.token_store)
+            await anyio.to_thread.run_sync(self.garmin.save, api, self.token_store(profile_id))
         except Exception as err:
             reason = (
                 "Garmin didn't issue a session kcal can keep"
@@ -410,7 +419,10 @@ class LoginPage:
             return self._form(
                 request, request_id, error=f"Signed in, but {reason}. Please try again."
             )
-        await anyio.to_thread.run_sync(self.on_login)
+        # A new revision: the server reloads this profile's session.
+        if (previous := self.oauth.set_garmin_profile(user, profile_id)) is not None:
+            # This email used another Garmin account before, now nobody's.
+            shutil.rmtree(self.token_store(previous).parent, ignore_errors=True)
         if request_id is None:
             return self._page(
                 "Garmin session refreshed",
@@ -418,7 +430,7 @@ class LoginPage:
                 "again; there's no need to reconnect the connector.</p>",
             )
         try:
-            back = self.oauth.complete_authorization(request_id, subject=str(profile_id))
+            back = self.oauth.complete_authorization(request_id, subject=user)
         except KeyError:
             return self._expired_request(request, request_id)
         return self._secure(RedirectResponse(back, status_code=303))
@@ -434,21 +446,26 @@ class LoginPage:
     # --- failures ------------------------------------------------------------------
 
     @contextmanager
-    def _attempt(self):
-        """Reserve a slot until credential AND owner checks have finished."""
-        self._in_flight += 1
+    def _attempt(self, user: str):
+        """Reserve one of `user`'s slots until the sign-in has finished."""
+        self._in_flight[user] = self._in_flight.get(user, 0) + 1
         try:
             yield
         finally:
-            self._in_flight -= 1
+            self._in_flight[user] -= 1
+            if not self._in_flight[user]:
+                del self._in_flight[user]
 
-    def _locked(self, request, request_id) -> Response | None:
+    def _locked(self, request, request_id, user: str) -> Response | None:
         now = time.time()
-        while self._failures and self._failures[0] <= now - FAILURE_WINDOW_SECONDS:
-            self._failures.popleft()
-        if len(self._failures) + self._in_flight < MAX_FAILURES:
+        failures = self._failures.get(user, deque())
+        while failures and failures[0] <= now - FAILURE_WINDOW_SECONDS:
+            failures.popleft()
+        if not failures:
+            self._failures.pop(user, None)
+        if len(failures) + self._in_flight.get(user, 0) < MAX_FAILURES:
             return None
-        oldest = self._failures[0] if self._failures else now
+        oldest = failures[0] if failures else now
         minutes = int((oldest + FAILURE_WINDOW_SECONDS - now) // 60) + 1
         return self._dead_end(
             request, "Too many attempts",
@@ -457,17 +474,14 @@ class LoginPage:
             request_id, status=429,
         )
 
-    def _failed(self, request, request_id, err: Exception, email: str) -> Response:
-        return self._form(request, request_id, error=self._record_failure(err), email=email)
-
-    def _record_failure(self, err: Exception, what: str = "") -> str:
-        """Count the failure toward the limit (unless Garmin was simply
+    def _record_failure(self, err: Exception, user: str, what: str = "") -> str:
+        """Count the failure toward `user`'s limit (unless Garmin was simply
         unreachable) and say what went wrong.
         """
         if isinstance(err, GarminConnectConnectionError):
-            # Garmin unreachable: not the owner's fault, not counted.
+            # Garmin unreachable: not the user's fault, not counted.
             return "Couldn't reach Garmin. Please try again in a moment."
-        self._failures.append(time.time())
+        self._failures.setdefault(user, deque()).append(time.time())
         if isinstance(err, GarminConnectTooManyRequestsError):
             return "Garmin is limiting sign-ins right now. Please wait a few minutes."
         if what == "code":

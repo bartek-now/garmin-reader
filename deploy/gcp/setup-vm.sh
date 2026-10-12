@@ -3,11 +3,11 @@
 # at the given git ref, writes the settings and (re)starts the containers.
 # Safe to run again; that's how updates happen.
 #
-# Usage: setup-vm.sh <domain> <garmin-owner-id> <git-ref>
+# Usage: setup-vm.sh <domain> <allowed-emails,comma-separated> <git-ref>
 set -euo pipefail
 
 DOMAIN=${1:?domain}
-OWNER=${2:?Garmin owner ID}
+EMAILS=${2:?allowed emails}
 REF=${3:?git ref}
 REPO=https://github.com/bartek-now/kcal.git
 DIR=/opt/kcal
@@ -46,7 +46,7 @@ echo "kcal at $(sudo git -C "$DIR" log -1 --format='%h %s')"
 
 # Settings, readable by root only.
 sudo install -m 600 /dev/null "$DIR/deploy/gcp/.env"
-printf 'KCAL_DOMAIN=%s\nKCAL_GARMIN_OWNER=%s\n' "$DOMAIN" "$OWNER" | sudo tee "$DIR/deploy/gcp/.env" >/dev/null
+printf 'KCAL_DOMAIN=%s\nKCAL_ALLOWED_EMAILS=%s\n' "$DOMAIN" "$EMAILS" | sudo tee "$DIR/deploy/gcp/.env" >/dev/null
 
 cd "$DIR/deploy/gcp"
 # Recreate both containers every time: Compose doesn't reliably notice a

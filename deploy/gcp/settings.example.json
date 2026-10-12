@@ -1,0 +1,6 @@
+{
+  "domain": "garminmcp.example.com",
+  "project": "my-kcal-project",
+  "zone": "us-east1-b",
+  "allowedEmails": ["you@example.com", "friend@example.com"]
+}

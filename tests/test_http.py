@@ -206,7 +206,6 @@ def runs(monkeypatch, tmp_path):
     )
     monkeypatch.delenv("KCAL_PUBLIC_URL", raising=False)
     monkeypatch.delenv("KCAL_PORT", raising=False)
-    monkeypatch.delenv("KCAL_GARMIN_OWNER", raising=False)
     return calls
 
 
@@ -216,32 +215,54 @@ def test_main_defaults_to_stdio(runs):
 
 
 def test_main_http_always_uses_oauth(runs, capsys, tmp_path):
-    assert mcp_server.main(["--http", "--public-url", PUBLIC, "--garmin-owner", "42"]) == 0
+    assert mcp_server.main(["--http", "--public-url", PUBLIC, "--allowed-emails", "me@example.com"]) == 0
     [(server, transport)] = runs
     assert transport == "streamable-http"
     assert server.settings.auth is not None
     assert str(server.settings.auth.issuer_url).rstrip("/") == PUBLIC
     assert (tmp_path / "mcp_auth.sqlite").exists()
-    assert f"clients sign in at {PUBLIC}/login" in capsys.readouterr().err
+    assert f"1 user(s) may sign in at {PUBLIC}/login" in capsys.readouterr().err
 
 
 def test_main_http_has_no_unauthenticated_mode(runs):
     with pytest.raises(SystemExit):
-        mcp_server.main(["--http", "--no-auth", "--public-url", PUBLIC, "--garmin-owner", "42"])
+        mcp_server.main(["--http", "--no-auth", "--public-url", PUBLIC, "--allowed-emails", "me@example.com"])
     assert runs == []
 
 
-def test_main_http_requires_owner(runs, capsys):
+def test_main_http_requires_allowed_emails(runs, capsys):
     assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
     assert runs == []
-    err = capsys.readouterr().err
-    assert "KCAL_GARMIN_OWNER" in err and "kcal whoami" in err
+    assert "KCAL_ALLOWED_EMAILS" in capsys.readouterr().err
 
 
-def test_main_http_rejects_non_numeric_owner(runs, capsys, monkeypatch):
-    monkeypatch.setenv("KCAL_GARMIN_OWNER", "bartek")
+def test_main_http_rejects_entries_that_arent_emails(runs, capsys, monkeypatch):
+    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com, 2426101")
     assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
-    assert "profile ID" in capsys.readouterr().err
+    assert "aren't emails" in capsys.readouterr().err and runs == []
+
+
+def test_main_http_explains_the_old_owner_setting(runs, capsys, monkeypatch):
+    monkeypatch.setenv("KCAL_GARMIN_OWNER", "2426101")
+    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com")
+    assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
+    assert "KCAL_ALLOWED_EMAILS" in capsys.readouterr().err and runs == []
+
+
+def test_allowed_emails_are_lowercased_and_split():
+    s = HttpSettings.from_env({
+        "KCAL_PUBLIC_URL": PUBLIC,
+        "KCAL_ALLOWED_EMAILS": " Me@Example.com,friend@example.com\n a@b.pl ",
+    })
+    assert s.allowed_emails == {"me@example.com", "friend@example.com", "a@b.pl"}
+
+
+def test_allowed_emails_flag_wins_over_env():
+    s = HttpSettings.from_env(
+        {"KCAL_PUBLIC_URL": PUBLIC, "KCAL_ALLOWED_EMAILS": "env@example.com"},
+        allowed_emails="flag@example.com",
+    )
+    assert s.allowed_emails == {"flag@example.com"}
 
 
 def test_main_http_reports_bad_settings(runs, capsys):
@@ -252,7 +273,7 @@ def test_main_http_reports_bad_settings(runs, capsys):
 
 def test_main_http_runs_streamable_http(runs, monkeypatch):
     monkeypatch.setenv("KCAL_PUBLIC_URL", PUBLIC)
-    monkeypatch.setenv("KCAL_GARMIN_OWNER", "42")
+    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com")
     assert mcp_server.main(["--http", "--port", "8123"]) == 0
     [(server, transport)] = runs
     assert transport == "streamable-http"
@@ -351,7 +372,7 @@ def test_platform_port_is_used_when_kcal_port_isnt_set():
 
 def test_main_listens_where_told(runs, monkeypatch):
     monkeypatch.setenv("KCAL_PUBLIC_URL", PUBLIC)
-    monkeypatch.setenv("KCAL_GARMIN_OWNER", "42")
+    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com")
     monkeypatch.setenv("KCAL_HOST", "0.0.0.0")
     assert mcp_server.main(["--http"]) == 0
     [(server, _)] = runs
@@ -362,7 +383,7 @@ def test_healthz_needs_no_sign_in_and_says_nothing_else(tmp_path):
     from kcal.oauth import KcalOAuthProvider
 
     provider = KcalOAuthProvider(tmp_path / "a.sqlite", PUBLIC)
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=1), provider)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({"me@example.com"})), provider)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         assert post(c, INIT).status_code == 401  # /mcp still needs a token
         # Health checks often come from inside the platform, with any Host.

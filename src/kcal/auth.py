@@ -52,18 +52,22 @@ def login(
     password: str | None = None,
     token_store: Path | None = None,
     prompt_mfa: Callable[[], str] = _prompt_mfa,
+    env_credentials: bool = True,
 ) -> Garmin:
     """Log in to Garmin Connect, reusing a cached session when available.
 
     Credentials are only needed the first time (or after the cached session
     expires) - after that, `login()` resumes from `token_store` (default
-    KCAL_STATE_DIR/garmin_tokens, i.e. ~/.kcal/garmin_tokens).
+    KCAL_STATE_DIR/garmin_tokens, i.e. ~/.kcal/garmin_tokens). Without
+    `env_credentials`, GARMIN_EMAIL and GARMIN_PASSWORD are ignored: a
+    user's session must never be replaced by the environment's account.
     """
     token_store = token_store or garmin_token_store()
     token_store.parent.mkdir(parents=True, exist_ok=True)
 
-    email = email or os.environ.get("GARMIN_EMAIL")
-    password = password or os.environ.get("GARMIN_PASSWORD")
+    if env_credentials:
+        email = email or os.environ.get("GARMIN_EMAIL")
+        password = password or os.environ.get("GARMIN_PASSWORD")
 
     api = Garmin(email=email, password=password, prompt_mfa=prompt_mfa)
     _guard_token_refresh(api.client)

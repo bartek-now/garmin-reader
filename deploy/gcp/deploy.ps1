@@ -5,30 +5,65 @@ Deploys kcal to a Google Cloud e2-micro VM (free tier), or updates it.
 .DESCRIPTION
 Creates whatever is missing (static IP, firewall rules, VM), then runs
 setup-vm.sh on the VM, which builds the code from GitHub and restarts.
-Run it again to deploy a newer commit. Use a project dedicated to kcal:
-this removes the default network's rules that open SSH, RDP and ping to
-the internet. See docs/deployment.md, "Google Cloud VM".
+Run it again to deploy a newer commit, or after changing who may sign
+in. Use a project dedicated to kcal: this removes the default network's
+rules that open SSH, RDP and ping to the internet. See
+docs/deployment.md, "Google Cloud VM".
+
+Settings not given as parameters come from settings.local.json next to
+this script (gitignored, since the repository is public; copy
+settings.example.json).
 
 .EXAMPLE
-.\deploy\gcp\deploy.ps1 -Domain garminmcp.example.com -GarminOwner 1234567
+.\deploy\gcp\deploy.ps1
+.EXAMPLE
+.\deploy\gcp\deploy.ps1 -Ref my-branch
 #>
 param(
-    [Parameter(Mandatory)][ValidatePattern('^[a-z0-9.-]+$')]
     [string]$Domain,
-    # Garmin profile ID allowed to sign in; `kcal whoami` prints it.
-    [Parameter(Mandatory)][ValidatePattern('^[0-9]+$')]
-    [string]$GarminOwner,
+    # Garmin login emails allowed to sign in.
+    [string[]]$AllowedEmails,
     # Branch, tag or commit to deploy; it must be pushed to GitHub.
     [ValidatePattern('^[A-Za-z0-9._/-]+$')]
     [string]$Ref = 'master',
-    # Google Cloud project; gcloud's current one if not given.
+    # Google Cloud project. Required: gcloud's current one may be another account's.
     [string]$Project,
     # The free tier covers an e2-micro in us-east1, us-central1 and us-west1 only.
-    [string]$Zone = 'us-east1-b'
+    [string]$Zone
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
+
+$SettingsFile = Join-Path $PSScriptRoot 'settings.local.json'
+$Settings = if (Test-Path $SettingsFile) { Get-Content $SettingsFile -Raw | ConvertFrom-Json } else { $null }
+
+function Get-Setting($Given, [string]$Name, $Default) {
+    if ($Given) { return $Given }
+    if ($null -ne $Settings -and $Settings.PSObject.Properties[$Name]) { return $Settings.$Name }
+    return $Default
+}
+
+$Domain = Get-Setting $Domain 'domain' $null
+$AllowedEmails = @(Get-Setting $AllowedEmails 'allowedEmails' @())
+$Project = Get-Setting $Project 'project' $null
+$Zone = Get-Setting $Zone 'zone' 'us-east1-b'
+
+# Checked here because they're passed unquoted to the VM's shell.
+if (-not $Domain -or $Domain -notmatch '^[a-z0-9.-]+$') {
+    throw "Set the domain (lowercase hostname) with -Domain or in $SettingsFile"
+}
+if (-not $Project -or $Project -notmatch '^[a-z][a-z0-9-]+$') {
+    throw "Set the Google Cloud project ID with -Project or in $SettingsFile"
+}
+if ($Zone -notmatch '^[a-z0-9-]+$') { throw "Not a zone: $Zone" }
+if ($AllowedEmails.Count -eq 0) {
+    throw "Set the Garmin emails allowed to sign in with -AllowedEmails or in $SettingsFile"
+}
+foreach ($email in $AllowedEmails) {
+    if ($email -notmatch '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$') { throw "Not an email: $email" }
+}
+$Emails = ($AllowedEmails | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique) -join ','
 
 $Region = $Zone -replace '-[a-z]$', ''
 $Vm = 'kcal-mcp'
@@ -39,7 +74,7 @@ $SshFirewall = 'kcal-mcp-ssh-iap'
 # the caller's Google sign-in.
 $IapRange = '35.235.240.0/20'
 $Tag = 'kcal-mcp'
-$ProjectArgs = if ($Project) { @('--project', $Project) } else { @() }
+$ProjectArgs = @('--project', $Project)
 
 function Invoke-GCloud {
     # gcloud reports progress on stderr, so only its exit code means failure.
@@ -57,8 +92,7 @@ function Test-GCloud {
 
 $SshArgs = @('--zone', $Zone, '--strict-host-key-checking=no', '--tunnel-through-iap')
 
-$CurrentProject = if ($Project) { $Project } else { (& gcloud config get-value project 2>$null) }
-Write-Host "Project: $CurrentProject, zone: $Zone"
+Write-Host "Project: $Project, zone: $Zone, $Domain, allowed: $Emails"
 Invoke-GCloud services enable compute.googleapis.com iap.googleapis.com
 
 if (-not (Test-GCloud compute addresses describe $Address --region $Region)) {
@@ -66,8 +100,8 @@ if (-not (Test-GCloud compute addresses describe $Address --region $Region)) {
 }
 $Ip = Invoke-GCloud compute addresses describe $Address --region $Region '--format=value(address)'
 
-# HTTPS (and HTTP for certificate checks) from anywhere: the owner signs
-# in from any network, and Let's Encrypt's checks come from unpublished
+# HTTPS (and HTTP for certificate checks) from anywhere: users sign in
+# from any network, and Let's Encrypt's checks come from unpublished
 # addresses. Caddy refuses requests for any other hostname.
 if (-not (Test-GCloud compute firewall-rules describe $Firewall)) {
     Invoke-GCloud compute firewall-rules create $Firewall --network default `
@@ -115,7 +149,7 @@ try {
 # The arguments were validated above, so they need no quoting on the VM.
 # SSH through IAP occasionally drops at the end; setup-vm.sh is safe to
 # run again, so retry once.
-$SetupCommand = "bash /tmp/kcal-setup-vm.sh $Domain $GarminOwner $Ref"
+$SetupCommand = "bash /tmp/kcal-setup-vm.sh $Domain $Emails $Ref"
 try {
     Invoke-GCloud compute ssh $Vm @SshArgs --command $SetupCommand
 } catch {

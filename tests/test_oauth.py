@@ -18,7 +18,9 @@ from kcal.settings import HttpSettings
 PUBLIC = "https://abc-def.trycloudflare.com"
 RESOURCE = PUBLIC + "/mcp"
 REDIRECT = "https://claude.ai/api/mcp/auth_callback"
-OWNER = 12345
+USER = "me@example.com"
+OTHER = "friend@example.com"
+USERS = frozenset({USER, OTHER})
 MCP_HEADERS = {
     "Accept": "application/json, text/event-stream",
     "Content-Type": "application/json",
@@ -46,7 +48,7 @@ def provider(db):
 
 @pytest.fixture
 def client(provider):
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=OWNER), provider)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), provider)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         yield c
 
@@ -89,13 +91,13 @@ def exchange_code(client, client_id, code, verifier):
     })
 
 
-def connect(client, provider):
-    """Register, authorize, 'log in' as the owner, exchange the code."""
+def connect(client, provider, user=USER):
+    """Register, authorize, 'log in' as `user`, exchange the code."""
     client_id = register(client)
     verifier, challenge = pkce()
     r = start_authorize(client, client_id, challenge)
     request_id = query(r.headers["location"])["req"]
-    back = provider.complete_authorization(request_id, subject=str(OWNER))
+    back = provider.complete_authorization(request_id, subject=user)
     r = exchange_code(client, client_id, query(back)["code"], verifier)
     assert r.status_code == 200, r.text
     return client_id, r.json()
@@ -166,7 +168,7 @@ def test_full_flow_then_mcp_works(client, provider):
 def test_completion_redirects_back_with_state(client, provider):
     client_id = register(client)
     r = start_authorize(client, client_id, pkce()[1])
-    back = provider.complete_authorization(query(r.headers["location"])["req"], str(OWNER))
+    back = provider.complete_authorization(query(r.headers["location"])["req"], USER)
     assert back.startswith(REDIRECT + "?")
     assert query(back)["state"] == "st4te" and query(back)["code"]
 
@@ -181,9 +183,9 @@ def test_denied_authorization_redirects_with_error(client, provider):
 def test_authorization_request_is_single_use(client, provider):
     client_id = register(client)
     request_id = query(start_authorize(client, client_id, pkce()[1]).headers["location"])["req"]
-    provider.complete_authorization(request_id, str(OWNER))
+    provider.complete_authorization(request_id, USER)
     with pytest.raises(KeyError):
-        provider.complete_authorization(request_id, str(OWNER))
+        provider.complete_authorization(request_id, USER)
     assert provider.deny_authorization(request_id) is None
 
 
@@ -194,7 +196,7 @@ def test_authorization_request_expires(client, provider, monkeypatch):
     monkeypatch.setattr(oauth.time, "time", lambda: later)
     assert provider.pending(request_id) is None
     with pytest.raises(KeyError):
-        provider.complete_authorization(request_id, str(OWNER))
+        provider.complete_authorization(request_id, USER)
 
 
 def test_authorize_rejects_other_resource(client):
@@ -212,7 +214,7 @@ def authorized_code(client, provider):
     client_id = register(client)
     verifier, challenge = pkce()
     request_id = query(start_authorize(client, client_id, challenge).headers["location"])["req"]
-    code = query(provider.complete_authorization(request_id, str(OWNER)))["code"]
+    code = query(provider.complete_authorization(request_id, USER))["code"]
     return client_id, code, verifier
 
 
@@ -322,7 +324,7 @@ def test_clients_and_tokens_survive_a_restart(client, provider, db):
     client_id, tokens = connect(client, provider)
     provider.close()
     reopened = KcalOAuthProvider(db, PUBLIC)
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=OWNER), reopened)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), reopened)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         assert mcp_call(c, tokens["access_token"]).status_code == 200
         assert refresh(c, client_id, tokens["refresh_token"]).status_code == 200
@@ -336,11 +338,14 @@ def test_tokens_are_stored_hashed(client, provider, db):
     assert tokens["refresh_token"].encode() not in raw
 
 
-def test_tokens_carry_the_owner(client, provider):
-    _, tokens = connect(client, provider)
+def test_tokens_carry_their_user(client, provider):
     import asyncio
-    loaded = asyncio.run(provider.load_access_token(tokens["access_token"]))
-    assert loaded.subject == str(OWNER) and loaded.resource == RESOURCE
+    _, mine = connect(client, provider)
+    _, theirs = connect(client, provider, user=OTHER)
+    loaded = asyncio.run(provider.load_access_token(mine["access_token"]))
+    assert loaded.subject == USER and loaded.resource == RESOURCE
+    loaded = asyncio.run(provider.load_access_token(theirs["access_token"]))
+    assert loaded.subject == OTHER
 
 
 # --- the login page route ------------------------------------------------------------
@@ -481,54 +486,92 @@ def test_revoke_all_command_without_database(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "mcp_auth.sqlite").exists()
 
 
-def test_changed_owner_revokes_tokens_and_codes(client, provider, db):
-    client_id, tokens = connect(client, provider)
-    code_client, code, verifier = authorized_code(client, provider)
-    changed = KcalOAuthProvider(db, PUBLIC)
+def test_removed_user_loses_tokens_and_profile(client, provider, db):
+    client_id, mine = connect(client, provider)
+    _, theirs = connect(client, provider, user=OTHER)
+    provider.set_garmin_profile(USER, 1)
+    provider.set_garmin_profile(OTHER, 2)
+    provider.close()
+    restarted = KcalOAuthProvider(db, PUBLIC)
     try:
-        server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=OWNER + 1), changed)
+        assert restarted.configure_allowed(frozenset({OTHER})) == [1]
+        server = mcp_server.build_server(
+            HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({OTHER})), restarted
+        )
         with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
-            assert mcp_call(c, tokens["access_token"]).status_code == 401
-            assert refresh(c, client_id, tokens["refresh_token"]).status_code == 400
-            new_client = register(c)
-            new_verifier, challenge = pkce()
-            req = query(start_authorize(c, new_client, challenge).headers["location"])["req"]
-            new_code = query(changed.complete_authorization(req, str(OWNER + 1)))["code"]
-            r = exchange_code(c, new_client, new_code, new_verifier)
-            assert r.status_code == 200
-            assert mcp_call(c, r.json()["access_token"]).status_code == 200
-        # The old, still-running provider also sees the ownership change.
-        assert mcp_call(client, tokens["access_token"]).status_code == 401
-        assert exchange_code(client, code_client, code, verifier).status_code == 400
-        changed.configure_owner(OWNER)
-        assert mcp_call(client, tokens["access_token"]).status_code == 401
-        assert exchange_code(client, code_client, code, verifier).status_code == 400
+            assert mcp_call(c, mine["access_token"]).status_code == 401
+            assert refresh(c, client_id, mine["refresh_token"]).status_code == 400
+            assert mcp_call(c, theirs["access_token"]).status_code == 200
+        assert restarted.garmin_profile(USER) is None
+        assert restarted.garmin_profile(OTHER) == 2
+        with sqlite3.connect(db) as raw:
+            subjects = {s for (s,) in raw.execute("SELECT subject FROM tokens")}
+            assert subjects == {OTHER}
+            assert raw.execute("SELECT email FROM users").fetchall() == [(OTHER,)]
+        # Allowed again later: they connect again, from scratch.
+        assert restarted.configure_allowed(USERS) == []
+        assert restarted.garmin_profile(USER) is None
     finally:
-        changed.close()
+        restarted.close()
 
 
-def test_first_owner_binding_migrates_existing_tokens(client, provider, db):
-    _, mine = connect(client, provider)
-    _, other = connect(client, provider)
+def test_token_of_a_user_who_isnt_allowed_never_loads(client, provider, db):
+    # Still in the database, e.g. restored from a backup: refused anyway.
+    client_id, tokens = connect(client, provider, user=OTHER)
     with sqlite3.connect(db) as raw:
-        raw.execute("UPDATE tokens SET subject = ? WHERE token_hash = ?",
-                    (str(OWNER + 1), oauth._hash(other["access_token"])))
-        raw.execute("DROP TABLE auth_state")  # the schema before owner binding
+        raw.execute("UPDATE tokens SET subject = 'stranger@example.com'")
+    assert mcp_call(client, tokens["access_token"]).status_code == 401
+    assert refresh(client, client_id, tokens["refresh_token"]).status_code == 400
+
+
+def test_profile_shared_by_an_allowed_user_is_not_orphaned(provider):
+    provider.configure_allowed(USERS)
+    provider.set_garmin_profile(USER, 7)
+    provider.set_garmin_profile(OTHER, 7)  # e.g. the account's login email changed
+    assert provider.configure_allowed(frozenset({OTHER})) == []
+
+
+def test_tokens_from_before_multiple_users_are_dropped(client, provider, db):
+    _, mine = connect(client, provider)
+    _, old = connect(client, provider)
+    with sqlite3.connect(db) as raw:
+        # Single-owner servers stored the Garmin profile ID as the subject.
+        raw.execute("UPDATE tokens SET subject = '12345' WHERE token_hash = ?",
+                    (oauth._hash(old["access_token"]),))
+        raw.execute("UPDATE auth_state SET owner = '12345'")
     migrated = KcalOAuthProvider(db, PUBLIC)
     try:
-        server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=OWNER), migrated)
+        server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), migrated)
         with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
             assert mcp_call(c, mine["access_token"]).status_code == 200
-            assert mcp_call(c, other["access_token"]).status_code == 401
+            assert mcp_call(c, old["access_token"]).status_code == 401
+        with sqlite3.connect(db) as raw:
+            assert raw.execute(
+                "SELECT COUNT(*) FROM tokens WHERE subject = '12345'"
+            ).fetchone()[0] == 0
     finally:
         migrated.close()
 
 
-def test_provider_rejects_wrong_owner_at_completion(client, provider):
+def test_provider_rejects_users_who_arent_allowed(client, provider):
     client_id = register(client)
     req = query(start_authorize(client, client_id, pkce()[1]).headers["location"])["req"]
-    with pytest.raises(KeyError, match="different owner"):
-        provider.complete_authorization(req, str(OWNER + 1))
+    with pytest.raises(KeyError, match="Not an allowed user"):
+        provider.complete_authorization(req, "stranger@example.com")
+    with pytest.raises(KeyError, match="Not an allowed user"):
+        provider.set_garmin_profile("stranger@example.com", 3)
+    assert provider.garmin_profile("stranger@example.com") is None
+    # The request still waits for an allowed user.
+    assert provider.pending(req) is not None
+
+
+def test_unconfigured_provider_allows_nobody(db):
+    p = KcalOAuthProvider(db, PUBLIC)
+    try:
+        assert not p.is_allowed(USER)
+        assert p.garmin_profile(USER) is None
+    finally:
+        p.close()
 
 
 def test_revoke_cli_invalidates_codes_and_waiting_logins(client, provider, db, monkeypatch):
@@ -540,15 +583,14 @@ def test_revoke_cli_invalidates_codes_and_waiting_logins(client, provider, db, m
     assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
     assert provider.pending(req) is None
     with pytest.raises(KeyError):
-        provider.complete_authorization(req, str(OWNER))
+        provider.complete_authorization(req, USER)
     # A genuinely new authorization after revocation remains usable.
     _, tokens = connect(client, provider)
     assert mcp_call(client, tokens["access_token"]).status_code == 200
 
 
 @pytest.mark.parametrize("kind", ["code", "refresh"])
-@pytest.mark.parametrize("change", ["revoke", "owner"])
-def test_revocation_between_loading_and_exchanging(client, provider, db, kind, change):
+def test_revocation_between_loading_and_exchanging(client, provider, db, kind):
     import asyncio
 
     if kind == "code":
@@ -564,10 +606,7 @@ def test_revocation_between_loading_and_exchanging(client, provider, db, kind, c
     assert loaded is not None
     other_process = KcalOAuthProvider(db, PUBLIC)
     try:
-        if change == "revoke":
-            other_process.revoke_all()
-        else:
-            other_process.configure_owner(OWNER + 1)
+        other_process.revoke_all()
         with pytest.raises(oauth.TokenError):
             asyncio.run(exchange())
         with sqlite3.connect(db) as raw:

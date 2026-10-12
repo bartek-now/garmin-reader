@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .env
 *.egg-info/
+
+# deploy.ps1 settings: emails and hosts stay out of the public repository.
+deploy/gcp/settings.local.json
