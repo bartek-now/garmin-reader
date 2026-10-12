@@ -50,6 +50,7 @@ from kcal import endpoints, mcp_server
 from kcal.auth import GarminRefreshUnavailable, _guard_token_refresh
 from kcal.oauth import KcalOAuthProvider
 from kcal.settings import HttpSettings
+from signed_in import as_user
 
 PUBLIC = "https://abc-def.trycloudflare.com"
 
@@ -336,15 +337,30 @@ def test_concurrent_real_refresh_rotates_and_persists_tokens(garmin, tmp_path, g
 # --- through the server -----------------------------------------------------------------
 
 
+USER = "me@example.com"
+
+
 @pytest.fixture
 def server(tmp_path, monkeypatch):
+    """The HTTP server, with tool calls made as USER."""
     monkeypatch.setenv("KCAL_STATE_DIR", str(tmp_path))
     provider = KcalOAuthProvider(tmp_path / "mcp_auth.sqlite", PUBLIC)
-    # Owner verification has separate tests; these exercise errors from the
+    # Profile verification has separate tests; these exercise errors from the
     # health request itself, after an already successful identity check.
     monkeypatch.setattr(mcp_server, "garmin_profile_id", lambda api: 1)
-    yield mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=1), provider)
+    # USER signed in to Garmin as profile 1; its stored session's revision.
+    monkeypatch.setattr(provider, "garmin_session", lambda email: (1, "rev") if email == USER else None)
+    server = mcp_server.build_server(
+        HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({USER})), provider
+    )
+    with as_user(USER):
+        yield server
     provider.close()
+
+
+def use_session(api) -> None:
+    """USER's cached Garmin session is `api`."""
+    mcp_server._profile_sessions[1] = mcp_server._ProfileSession(api=api, revision="rev")
 
 
 def tool_error(server, name, args) -> str:
@@ -364,10 +380,10 @@ def test_real_logout_gets_sign_in_instructions(server, garmin, monkeypatch, tool
     session = FakeGarminApi({})
     stub(garmin.client, "_api_session", session)
     attempts = refresh_answers(garmin, 400)
-    monkeypatch.setattr(mcp_server, "_api", garmin)
+    use_session(garmin)
     message = tool_error(server, tool, args)
     assert "Garmin session expired" in message and f"open {PUBLIC}/login" in message
-    assert mcp_server._api is None
+    assert mcp_server._profile_sessions[1].api is None
     # Reached through Garmin's actual answers, not some other failure.
     assert session.requests == ["old-access", "old-access"] and attempts == ["refresh"]
 
@@ -384,11 +400,11 @@ def test_real_logout_gets_sign_in_instructions(server, garmin, monkeypatch, tool
 def test_real_rate_limit_gets_try_again_later(server, garmin, monkeypatch, tool, args):
     session = FakeGarminApi({"old-access": 429})
     stub(garmin.client, "_api_session", session)
-    monkeypatch.setattr(mcp_server, "_api", garmin)
+    use_session(garmin)
     message = tool_error(server, tool, args)
     assert "try again in a few minutes" in message and "/login" not in message
     assert len(session.requests) == 1  # stopped at the first 429
-    assert mcp_server._api is garmin  # the session itself is fine: kept
+    assert mcp_server._profile_sessions[1].api is garmin  # the session itself is fine: kept
 
 
 @pytest.mark.parametrize("failure", [429, 500, 503, 408, "timeout", "connection"])
@@ -412,13 +428,13 @@ def test_temporary_refresh_failure_keeps_session(server, garmin, monkeypatch, fa
 
     stub(garmin.client, "_http_post", post)
     _guard_token_refresh(garmin.client)
-    monkeypatch.setattr(mcp_server, "_api", garmin)
+    use_session(garmin)
     # Avoid upstream retries so counts prove no stale-token retry or
     # second metric request occurs after the temporary refresh failure.
     message = tool_error(server, tool, args)
     assert "try again in a few minutes" in message
     assert "/login" not in message and "expired" not in message
-    assert mcp_server._api is garmin
+    assert mcp_server._profile_sessions[1].api is garmin
     assert session.requests == ["old-access"]
     assert attempts == ["refresh"]
     assert garmin.client._http_post is post

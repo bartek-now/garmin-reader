@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     environment:
       KCAL_PUBLIC_URL: https://${KCAL_DOMAIN:?set KCAL_DOMAIN in .env}
-      KCAL_GARMIN_OWNER: ${KCAL_GARMIN_OWNER:?set KCAL_GARMIN_OWNER in .env}
+      KCAL_ALLOWED_EMAILS: ${KCAL_ALLOWED_EMAILS:?set KCAL_ALLOWED_EMAILS in .env}
       # Caddy's address, so logs show the real client from X-Forwarded-For.
       FORWARDED_ALLOW_IPS: 172.30.0.10
     volumes:

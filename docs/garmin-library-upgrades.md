@@ -26,7 +26,7 @@ minimum supported release; kcal uses its token lock.
 | Observe refresh HTTP errors | `_refresh_di_token()` still treats every non-success response as an authentication error; `_refresh_session()` still catches every exception. Unwrapped refresh 429, 408, 500, 503, timeout, and connection failures all retry the old access token and ultimately produce an authentication error. | Keep `_http_post` interception and the post-refresh re-raise. |
 | Prevent credential fallback during a cache refresh outage | `Garmin.login()` still catches proactive-refresh errors in its cache-loading block. With just our refresh interceptor, it requests credentials or attempts password login instead of preserving the outage error. | Keep the temporary `client.login` guard and original-error restoration in `auth.login()`. |
 | Preserve exception causes | The getter decorator still wraps connection errors with `raise ... from e`. Its new `GarminConnectNotFoundError` remains a subclass of `GarminConnectConnectionError`. | Keep the refresh marker and cause traversal so outages fail the whole call while optional endpoint errors stay isolated. |
-| Credential login, MFA, owner verification, and persistence | `client.login(..., return_on_mfa=True)` still bypasses token-store loading and returns `("needs_mfa", None)`. MFA state remains on the client; `resume_login(None, code)` still works at the implementation level. The DI token fields, `dump`/`load` format, HTTP boundary, and profile lookup path remain compatible. | Retain these dependencies. Upstream's token-validity check does not establish that the session belongs to `KCAL_GARMIN_OWNER`. |
+| Credential login, MFA, profile verification, and persistence | `client.login(..., return_on_mfa=True)` still bypasses token-store loading and returns `("needs_mfa", None)`. MFA state remains on the client; `resume_login(None, code)` still works at the implementation level. The DI token fields, `dump`/`load` format, HTTP boundary, and profile lookup path remain compatible. | Retain these dependencies. Upstream's token-validity check does not establish that the session belongs to the user's recorded Garmin profile. |
 
 The raw-library removal checks in `tests/test_garmin_library.py` deliberately
 assert the current upstream failure behavior, alongside tests for kcal's
@@ -69,7 +69,7 @@ they should not be mistaken for a guarantee of compatibility.
 | `api.client.login` called by `Garmin.login()` | [`auth.login()`](../src/kcal/auth.py) temporarily replaces the client method while loading the cached session. | A failed cache refresh may cause `Garmin.login()` to attempt credential login. The guard must stop that fallback for temporary failures and retain the original refresh error, including when credentials are configured. The original client method must be restored on success and failure. |
 | Direct credential login and MFA continuation | [`GarminGateway.start()` and `finish()`](../src/kcal/login_page.py) call `api.client.login(..., return_on_mfa=True)` and `api.resume_login(None, code)`. | Credential login must actually validate the submitted credentials rather than load `GARMINTOKENS`. Check the returned status (`"needs_mfa"`), where MFA continuation state lives, and whether passing `None` remains valid. |
 | `api.client._mfa_session` and `_mfa_flow` | [`GarminGateway.finish()`](../src/kcal/login_page.py) temporarily wraps the MFA session to see whether any verification POST got an answer from Garmin, because `_complete_mfa` raises the same authentication error for a wrong code as for timeouts, 5xx and bot-check pages (and the widget flow lets transport errors escape raw). No answer raises `GarminVerificationUnavailable`. | Both flows must still send the code through `_mfa_session.post`, and restore nothing else on the session. Portal and mobile must still answer in JSON, the widget in HTML; `_mfa_flow` must still say which. Doubtful responses count as an answer (a counted wrong code), never as an outage. The real-client tests cover timeouts, 5xx (including JSON bodies), bot-check pages, 429s and wrong codes in both flows. |
-| `api.client._mfa_pending` | [`GarminGateway.mfa_pending()`](../src/kcal/login_page.py) reads it after a failed code to decide whether `/login` shows the code form again or makes the owner start over. | A wrong or rate-limited code must leave it `True` (0.3.17 keeps the step open) and success must clear it; the real-client tests check both. If it disappears, `mfa_pending()` says no and the owner starts over: safe, but the retry is lost. |
+| `api.client._mfa_pending` | [`GarminGateway.mfa_pending()`](../src/kcal/login_page.py) reads it after a failed code to decide whether `/login` shows the code form again or makes the user start over. | A wrong or rate-limited code must leave it `True` (0.3.17 keeps the step open) and success must clear it; the real-client tests check both. If it disappears, `mfa_pending()` says no and the user starts over: safe, but the retry is lost. |
 | Token persistence | [`GarminGateway.save()`](../src/kcal/login_page.py) calls `api.client.dump(path)`; [`auth.login()`](../src/kcal/auth.py) reloads that store through `Garmin.login(path)`. | Saved tokens must reload without credentials and remain renewable. Inspect changes to the file format, save timing, and file permissions. |
 | Range getters `get_hrv_data_range(start, end)` and `get_sleep_daily(start, end)` | [`summary._hrv()` and `_sleep()`](../src/kcal/summary.py); both are on `REMOTE_ALLOWED`. | `get_hrv_data_range` must still return `{"hrvSummaries": [...]}` from one request. `get_sleep_daily` must still split ranges into Garmin's 28-day chunks and return the merged, de-duplicated `individualStats` rows. `tests/test_garmin_library.py` checks both with the real client. Training readiness has no range getter; kcal still requests it by raw path (`summary.RANGE_PATHS`), so check whether a getter has appeared. Because range getters can make many requests (one per chunk or page), `call_garmin_endpoint` refuses date ranges over 366 days before calling any getter with a `start`/`end`, `startdate`/`enddate` or `fromdate`/`todate` pair; check new getters use one of those names. A missing end counts as today unless the getter is in `endpoints.MISSING_END_IS_START` (those set end = start); the real-client tests check that list, and a new getter with an optional end needs a decision. |
 | Exception translation and chaining | [`auth.is_refresh_unavailable()`](../src/kcal/auth.py), [`endpoints.py`](../src/kcal/endpoints.py), [`summary.py`](../src/kcal/summary.py), and [`mcp_server.py`](../src/kcal/mcp_server.py). | Library decorators may wrap connection errors. The adapter's `GarminRefreshUnavailable` marker must remain reachable through `__cause__` or `__context__`. A refresh outage must fail the whole tool call with retry guidance; an unsupported optional endpoint's 404 must still allow other metrics to return. |
@@ -78,7 +78,7 @@ they should not be mistaken for a guarantee of compatibility.
 Garmin APIs. Check that an upgrade still permits these instance/function
 attributes and does not introduce conflicting names.
 
-Owner verification also uses `api.client.connectapi()` with the raw Garmin
+Profile verification also uses `api.client.connectapi()` with the raw Garmin
 path `/userprofile-service/socialProfile`, expecting a numeric `profileId`.
 This depends on Garmin's response schema as well as the Python client. A
 profile lookup failure must block health-data access without marking the
@@ -115,7 +115,7 @@ hook, or removing the assertions that prove the fake HTTP layer was reached.
 2. Run the focused checks using that environment's Python:
 
    ```console
-   python -m pytest tests/test_garmin_library.py tests/test_auth.py tests/test_login_page.py tests/test_owner_binding.py -q
+   python -m pytest tests/test_garmin_library.py tests/test_auth.py tests/test_login_page.py tests/test_users.py -q
    python -m pytest tests/test_summary.py tests/test_endpoints.py tests/test_remote_exposure.py -q
    ```
 
@@ -128,7 +128,7 @@ hook, or removing the assertions that prove the fake HTTP layer was reached.
      session and tokens. Recovery works without a password login.
    - Cached-login refresh outages cannot trigger credential fallback, with
      or without credentials configured.
-   - Parallel refreshes do not overlap, owner checks precede health requests,
+   - Parallel refreshes do not overlap, profile checks precede health requests,
      and an optional endpoint failure remains isolated from other metrics.
 3. Review getter names and signatures, `REMOTE_ALLOWED`, and response fields
    used by the privacy filter and summaries. New `get_*` methods become

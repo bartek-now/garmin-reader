@@ -134,28 +134,31 @@ Over HTTP, the tools only reach an allowlist of health and fitness endpoints
 (coordinates, GPS tracks, place names, your name and profile photo) is
 stripped from every result.
 
-Clients connect with OAuth: they register themselves and send you to
-`<public URL>/login`, where you sign in to Garmin (with the verification
-code if Garmin asks). Only the Garmin account set as owner gets through,
-and failed sign-ins are capped at 5 an hour. When Garmin's session expires,
-the tools answer with a link to the same page.
+Several people can use one server, each seeing only their own Garmin
+data. Clients connect with OAuth: they register themselves and send the
+user to `<public URL>/login`, where they sign in to Garmin (with the
+verification code if Garmin asks). Only Garmin login emails on the
+server's allowlist get through, checked before Garmin is contacted, and
+failed sign-ins are capped at 5 an hour per email. Each user's Garmin
+session is stored separately, and every tool call uses the session of the
+user its token belongs to. When a Garmin session expires, the tools answer
+with a link to the same page.
 
-1. Run `kcal whoami` to get your Garmin profile ID.
-2. Start a tunnel, e.g. `cloudflared tunnel --url http://localhost:8000`.
-3. Start `kcal-mcp --http --public-url <tunnel URL> --garmin-owner <profile ID>`.
-4. Add `<tunnel URL>/mcp` as a connector. In claude.ai choose "Sign in now"
+1. Start a tunnel, e.g. `cloudflared tunnel --url http://localhost:8000`.
+2. Start `kcal-mcp --http --public-url <tunnel URL> --allowed-emails you@example.com`.
+3. Add `<tunnel URL>/mcp` as a connector. In claude.ai choose "Sign in now"
    and "Register automatically"; in ChatGPT choose OAuth.
 
 `kcal-mcp --revoke-all` signs every client out, even while the server runs,
 and invalidates waiting sign-ins and unexchanged authorization codes.
-Changing `KCAL_GARMIN_OWNER` also invalidates existing authorizations. The
-stored Garmin session must belong to the configured owner before tools can
-read any health data.
+Removing an email from the allowlist signs that user out at the next start
+and deletes their stored Garmin session. A stored session must belong to
+the user's Garmin profile before tools can read any health data.
 
 | Setting | Flag | Default |
 |---|---|---|
 | `KCAL_PUBLIC_URL` | `--public-url` | required, e.g. `https://abc.trycloudflare.com` |
-| `KCAL_GARMIN_OWNER` | `--garmin-owner` | required; your Garmin profile ID from `kcal whoami` |
+| `KCAL_ALLOWED_EMAILS` | `--allowed-emails` | required; Garmin login emails allowed to sign in, comma-separated |
 | `KCAL_PORT` | `--port` | `$PORT`, else `8000` |
 | `KCAL_HOST` | `--host` | `127.0.0.1` (`0.0.0.0` in a container) |
-| `KCAL_STATE_DIR` | | `~/.kcal` (Garmin tokens, shared with `kcal fetch`; `mcp_auth.sqlite` with OAuth clients and hashed tokens) |
+| `KCAL_STATE_DIR` | | `~/.kcal` (`users/<profile>/` with each user's Garmin tokens; `mcp_auth.sqlite` with OAuth clients, hashed tokens and users) |

@@ -29,7 +29,7 @@ docker run -d --name kcal-mcp --restart unless-stopped \
   -p 8000:8000 \
   -v kcal-data:/data \
   -e KCAL_PUBLIC_URL=https://kcal.example.com \
-  -e KCAL_GARMIN_OWNER=1234567 \
+  -e KCAL_ALLOWED_EMAILS=you@example.com,friend@example.com \
   kcal-mcp
 ```
 
@@ -44,26 +44,29 @@ restarted.
 | Variable | Default | Meaning |
 |---|---|---|
 | `KCAL_PUBLIC_URL` | required | The HTTPS URL clients use, without a path. |
-| `KCAL_GARMIN_OWNER` | required | Garmin profile ID allowed to sign in. `kcal whoami` prints yours. |
+| `KCAL_ALLOWED_EMAILS` | required | Garmin login emails allowed to sign in, comma-separated. Each user sees only their own data. |
 | `KCAL_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Address to listen on. |
 | `KCAL_PORT` | `$PORT`, else `8000` | Port to listen on. Platforms such as Cloud Run set `PORT`; don't set `KCAL_PORT` there. |
-| `KCAL_STATE_DIR` | `~/.kcal` (`/data` in the image) | Where `garmin_tokens/` and `mcp_auth.sqlite` live. |
+| `KCAL_STATE_DIR` | `~/.kcal` (`/data` in the image) | Where `users/` (each user's Garmin session) and `mcp_auth.sqlite` live. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Read by uvicorn: the front end's address, so logs show the real client address from `X-Forwarded-For` instead of the front end's. Only affects logs. Never `*` if the server can be reached without the front end. |
 
 ## Signing in to Garmin on the host
 
-After the first start, open `<KCAL_PUBLIC_URL>/login` and sign in to Garmin
-(with the verification code if asked). The host then has its own Garmin
-session. Do this rather than copying your PC's tokens: a copied session is
-shared, and when either side renews it the other side's copy can stop
-working.
+Each user signs in to Garmin once at `<KCAL_PUBLIC_URL>/login` (with the
+verification code if asked), usually when first adding the connector. The
+host then has its own Garmin session for them, stored under
+`users/<Garmin profile ID>/`. Do this rather than copying a PC's tokens: a
+copied session is shared, and when either side renews it the other side's
+copy can stop working.
 
 Garmin's sign-in sits behind bot protection that can be stricter with
 data-centre addresses, so a sign-in from the host may be refused. Renewing an
 existing session usually still works. If it's refused: sign in on a PC with
-`kcal fetch`, copy `~/.kcal/garmin_tokens/garmin_tokens.json` into the
-volume's `garmin_tokens/`, restart, and from then on don't use that session
-on the PC (sign in again there if you need `kcal fetch`).
+`kcal fetch`, copy the folder with `garmin_tokens.json` to the host and run
+`kcal-mcp --import-garmin-session <email> <folder>` there (see the Google
+Cloud VM section for the exact commands). It stores the session as that
+user's, after checking with Garmin which account it is. From then on don't
+use that session on the PC (sign in again there if you need `kcal fetch`).
 
 ## Moving connected clients
 
@@ -79,9 +82,11 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
   sign-ins in progress don't.
 - **Signing everyone out:** `docker exec kcal-mcp kcal-mcp --revoke-all`.
   This also invalidates sign-ins in progress and outstanding authorization codes.
-- **Changing owners:** changing `KCAL_GARMIN_OWNER` revokes previous
-  authorizations. Sign in as the new owner at `/login`, then reconnect clients.
-  Stored Garmin credentials for a different account cannot serve health data.
+- **Adding or removing users:** change `KCAL_ALLOWED_EMAILS` and restart.
+  A new user adds the connector and signs in at `/login`. A removed user is
+  signed out at the start, and their stored Garmin session is deleted.
+  Upgrading from a single-owner version (`KCAL_GARMIN_OWNER`) signs every
+  client out once; reconnect them.
 - **Garmin session expired:** the tools reply with a link to `/login`; signing
   in there fixes it without reconnecting anything.
 - **Logs** go to stdout: every request's status line, plus the reason for any
@@ -126,40 +131,46 @@ would affect any other VM in the project. What stays open:
 1. `gcloud auth login` with the Google account that owns the project, then
    `gcloud config set project <project>` (the project needs billing enabled,
    even for the free tier).
-2. `.\deploy\gcp\deploy.ps1 -Domain garminmcp.example.com -GarminOwner <id>`
-   (`kcal whoami` prints the ID; `-Project` picks a project other than
-   gcloud's current one).
-3. Add a DNS `A` record for the hostname pointing at the IP the script
+2. Copy `deploy/gcp/settings.example.json` to `settings.local.json` and
+   fill in the hostname, project, zone and the Garmin login emails allowed
+   to sign in. It's gitignored: the repository is public. (Parameters such
+   as `-Domain` or `-AllowedEmails` override it.)
+3. `.\deploy\gcp\deploy.ps1`.
+4. Add a DNS `A` record for the hostname pointing at the IP the script
    prints. If the DNS is on Cloudflare, leave the record unproxied (grey
    cloud), so Caddy can get its certificate.
-4. Sign in to Garmin at `https://<hostname>/login`, then add the connector in
-   Claude or ChatGPT with `https://<hostname>/mcp`.
+5. Each user adds the connector in Claude or ChatGPT with
+   `https://<hostname>/mcp` and signs in to Garmin when asked.
 
-**Updating:** push to GitHub, then run `deploy.ps1` again with the same
-arguments (`-Ref` picks a branch, tag or commit; default `master`). It rebuilds and restarts; the volumes survive.
+**Updating:** push to GitHub, then run `deploy.ps1` again (`-Ref` picks a
+branch, tag or commit; default `master`). It rebuilds and restarts; the
+volumes survive. **Adding or removing a user:** edit `allowedEmails` in
+`settings.local.json` and run `deploy.ps1`.
 
 **On the VM** (`gcloud compute ssh kcal-mcp --zone us-east1-b --tunnel-through-iap`), from
 `/opt/kcal/deploy/gcp`:
 
 - logs: `sudo docker compose logs -f kcal`;
 - signing everyone out: `sudo docker compose exec kcal kcal-mcp --revoke-all`;
-- if Garmin refuses the sign-in from the VM (see above), copy the token file
-  to the VM (`gcloud compute scp --tunnel-through-iap`), then into the
-  volume, owned by the server's user:
+- if Garmin refuses a user's sign-in from the VM (see above), copy their
+  `garmin_tokens.json` to the VM (`gcloud compute scp --tunnel-through-iap`),
+  then import it as theirs:
 
   ```bash
-  sudo docker compose exec -u root kcal mkdir -p /data/garmin_tokens
-  sudo docker compose cp garmin_tokens.json kcal:/data/garmin_tokens/
-  sudo docker compose exec -u root kcal sh -c 'chown -R kcal:kcal /data/garmin_tokens && chmod 600 /data/garmin_tokens/*'
-  sudo docker compose restart kcal
+  sudo docker compose exec -u root kcal sh -c 'mkdir -p /tmp/import && chown kcal /tmp/import'
+  sudo docker compose cp garmin_tokens.json kcal:/tmp/import/
+  sudo docker compose exec -u root kcal chown kcal /tmp/import/garmin_tokens.json
+  sudo docker compose exec kcal kcal-mcp --import-garmin-session you@example.com /tmp/import
+  sudo docker compose exec -u root kcal rm -rf /tmp/import
   rm garmin_tokens.json
   ```
 
 ## Security
 
-- The volume holds a Garmin refresh token, which is access to your Garmin
-  account, and the OAuth database. Restrict who can read the disk, and
-  encrypt any backup of it.
+- The volume holds each user's Garmin refresh token, which is access to
+  their Garmin account, and the OAuth database. Restrict who can read the
+  disk, and encrypt any backup of it. Whoever runs the server can read every
+  user's data: only allow people who trust them.
 - Keep the server reachable only through the HTTPS front end; don't publish
   port 8000 to the internet directly.
 - The remote exposure rules (allowlist, no location or identity data) apply

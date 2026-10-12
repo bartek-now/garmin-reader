@@ -3,13 +3,18 @@
 The MCP SDK provides the endpoints (metadata, /register, /authorize, /token,
 /revoke) and checks PKCE, redirect URIs, client IDs and expiry. This module
 is the provider behind them: it stores registered clients and tokens, and
-hands the owner's browser to the /login page, which calls
-`complete_authorization()` once the owner has proved who they are.
+hands the user's browser to the /login page, which calls
+`complete_authorization()` once the user has proved who they are.
 
-Clients and tokens live in one SQLite file, so they survive restarts and a
-move to another host is copying that file. Tokens are stored as SHA-256
-hashes only. Pending authorizations and authorization codes are short-lived
-and kept in memory; a restart just means logging in again.
+Several people can use one server. Each token carries its user (the Garmin
+login email, lowercase) as its subject, and only users on the allowlist get
+or keep tokens. The users table remembers each user's Garmin profile, whose
+stored session serves their data.
+
+Clients, tokens and users live in one SQLite file, so they survive restarts
+and a move to another host is copying that file. Tokens are stored as
+SHA-256 hashes only. Pending authorizations and authorization codes are
+short-lived and kept in memory; a restart just means logging in again.
 
 The queries are small lookups in a local file, so they run directly on the
 event loop rather than in worker threads.
@@ -73,7 +78,7 @@ class KcalAuthorizationCode(AuthorizationCode):
 
 @dataclass
 class PendingAuthorization:
-    """An /authorize request waiting for the owner to log in."""
+    """An /authorize request waiting for the user to log in."""
 
     client: OAuthClientInformationFull
     params: AuthorizationParams
@@ -149,40 +154,120 @@ class KcalOAuthProvider:
                     subject TEXT
                 );
                 CREATE INDEX IF NOT EXISTS tokens_family ON tokens (family);
+                -- owner: unused since tokens carry their user; kept so
+                -- older databases open unchanged.
                 CREATE TABLE IF NOT EXISTS auth_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     owner TEXT,
                     generation INTEGER NOT NULL DEFAULT 0
                 );
                 INSERT OR IGNORE INTO auth_state (id) VALUES (1);
+                -- Whose Garmin session serves each user's data. `session`
+                -- changes whenever that profile's stored session is
+                -- replaced, so every server process reloads it.
+                CREATE TABLE IF NOT EXISTS users (
+                    email TEXT PRIMARY KEY,
+                    profile_id INTEGER NOT NULL,
+                    signed_in_at INTEGER NOT NULL,
+                    session TEXT NOT NULL
+                );
                 """
             )
         self._pending: dict[str, PendingAuthorization] = {}
         self._codes: dict[str, KcalAuthorizationCode] = {}
-        self._owner: str | None = None
+        # Who may sign in; None until configured, which allows no one.
+        self._allowed: frozenset[str] | None = None
 
-    def configure_owner(self, owner_id: int) -> None:
-        owner = str(owner_id)
+    def configure_allowed(self, emails: frozenset[str]) -> list[int]:
+        """Allow these users (lowercase emails) and nobody else. Tokens and
+        stored profiles of anyone else are deleted, including tokens from
+        before multiple users (whose subject was a Garmin profile ID).
+        Returns the Garmin profile IDs no allowed user has any more, whose
+        stored sessions the caller deletes.
+        """
+        allowed = frozenset(emails)
+        marks = ",".join("?" * len(allowed))
         # Explicit transactions coordinate with the revocation CLI's separate
         # connection. sqlite's context manager commits or rolls back without
         # rewriting exceptions (the SDK's TokenError is a frozen dataclass).
         with self._lock, self._db:
             self._db.execute("BEGIN IMMEDIATE")
-            previous = self._db.execute("SELECT owner FROM auth_state WHERE id = 1").fetchone()[0]
-            if previous is not None and previous != owner:
-                self._db.execute("DELETE FROM tokens")
-                self._db.execute("UPDATE auth_state SET generation = generation + 1 WHERE id = 1")
-            # Migrate existing databases, retaining only this owner's tokens.
-            self._db.execute("DELETE FROM tokens WHERE subject IS NULL OR subject != ?", (owner,))
-            self._db.execute("UPDATE auth_state SET owner = ? WHERE id = 1", (owner,))
-        self._owner = owner
+            self._db.execute(
+                f"DELETE FROM tokens WHERE subject IS NULL OR subject NOT IN ({marks})",
+                tuple(allowed),
+            )
+            removed = {
+                profile for (profile,) in self._db.execute(
+                    f"SELECT profile_id FROM users WHERE email NOT IN ({marks})", tuple(allowed)
+                )
+            }
+            self._db.execute(f"DELETE FROM users WHERE email NOT IN ({marks})", tuple(allowed))
+            kept = {profile for (profile,) in self._db.execute("SELECT profile_id FROM users")}
+            self._db.execute("UPDATE auth_state SET owner = NULL WHERE id = 1")
+        self._allowed = allowed
+        return sorted(removed - kept)
 
-    def _generation(self) -> int | None:
+    def is_allowed(self, email: str) -> bool:
+        return self._allowed is not None and email in self._allowed
+
+    def _generation(self) -> int:
         with self._lock:
-            owner, generation = self._db.execute(
-                "SELECT owner, generation FROM auth_state WHERE id = 1"
+            (generation,) = self._db.execute(
+                "SELECT generation FROM auth_state WHERE id = 1"
             ).fetchone()
-        return generation if self._owner is not None and owner == self._owner else None
+        return generation
+
+    # --- users -----------------------------------------------------------------
+
+    def set_garmin_profile(self, email: str, profile_id: int) -> int | None:
+        """`email` signed in to Garmin as `profile_id`, whose stored session
+        was just replaced: a new revision for everyone using that profile.
+        Returns the profile the email used before, if it's now nobody's, so
+        the caller deletes its stored session.
+        """
+        if not self.is_allowed(email):
+            raise KeyError("Not an allowed user")
+        revision = secrets.token_hex(8)
+        with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT profile_id FROM users WHERE email = ?", (email,)
+            ).fetchone()
+            self._db.execute(
+                "INSERT OR REPLACE INTO users (email, profile_id, signed_in_at, session) "
+                "VALUES (?, ?, ?, ?)",
+                (email, int(profile_id), int(time.time()), revision),
+            )
+            self._db.execute(
+                "UPDATE users SET session = ? WHERE profile_id = ?", (revision, int(profile_id))
+            )
+            if row is None or row[0] == int(profile_id):
+                return None
+            (others,) = self._db.execute(
+                "SELECT COUNT(*) FROM users WHERE profile_id = ?", (row[0],)
+            ).fetchone()
+        return row[0] if not others else None
+
+    def garmin_profiles(self) -> set[int]:
+        """Every Garmin profile an allowed user's data comes from."""
+        with self._lock:
+            return {profile for (profile,) in self._db.execute("SELECT profile_id FROM users")}
+
+    def garmin_session(self, email: str) -> tuple[int, str] | None:
+        """(Garmin profile, revision of its stored session) serving `email`,
+        if they ever signed in to Garmin and are still allowed.
+        """
+        if not self.is_allowed(email):
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT profile_id, session FROM users WHERE email = ?", (email,)
+            ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def garmin_profile(self, email: str) -> int | None:
+        link = self.garmin_session(email)
+        return link[0] if link else None
 
     # --- clients ---------------------------------------------------------
 
@@ -215,10 +300,8 @@ class KcalOAuthProvider:
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
-        """Park the request and send the owner's browser to /login."""
+        """Park the request and send the user's browser to /login."""
         generation = self._generation()
-        if generation is None:
-            raise AuthorizeError("invalid_request", "The server's owner has changed; reconnect.")
         if params.resource is not None and not _same_resource(params.resource, self.resource):
             raise AuthorizeError(
                 "invalid_request", f"This server only issues tokens for {self.resource}"
@@ -272,14 +355,14 @@ class KcalOAuthProvider:
         return self._pending.pop(request_id)
 
     def complete_authorization(self, request_id: str, subject: str) -> str:
-        """The owner logged in as `subject`: issue a code and return the URL
-        to send their browser back to the client. Single use.
+        """The user logged in as `subject` (their email): issue a code and
+        return the URL to send their browser back to the client. Single use.
         """
+        if not self.is_allowed(subject):
+            raise KeyError("Not an allowed user")
         p = self._take_pending(request_id)
         if p is None:
             raise KeyError("Unknown or expired authorization request")
-        if subject != self._owner:
-            raise KeyError("Authorization belongs to a different owner")
         now = time.time()
         self._codes = {k: c for k, c in self._codes.items() if c.expires_at > now}
         code = secrets.token_urlsafe(32)
@@ -392,18 +475,18 @@ class KcalOAuthProvider:
         ]
         with self._lock, self._db:
             self._db.execute("BEGIN IMMEDIATE")
-            owner, current_generation = self._db.execute(
-                "SELECT owner, generation FROM auth_state WHERE id = 1"
+            (current_generation,) = self._db.execute(
+                "SELECT generation FROM auth_state WHERE id = 1"
             ).fetchone()
-            if self._owner is None or owner != self._owner or subject != owner:
-                raise TokenError("invalid_grant", "Authorization belongs to a different owner")
+            if subject is None or not self.is_allowed(subject):
+                raise TokenError("invalid_grant", "Authorization belongs to a user who isn't allowed")
             if generation is not None and generation != current_generation:
                 raise TokenError("invalid_grant", "Authorization was revoked")
             if refresh_token is not None:
                 row = self._db.execute(
                     "SELECT scopes FROM tokens WHERE token_hash = ? AND kind = 'refresh' "
                     "AND client_id = ? AND family = ? AND subject = ? AND expires_at > ?",
-                    (_hash(refresh_token.token), client_id, family, owner, now),
+                    (_hash(refresh_token.token), client_id, family, subject, now),
                 ).fetchone()
                 if row is None:
                     raise TokenError("invalid_grant", "Refresh token was revoked or used")
@@ -433,19 +516,18 @@ class KcalOAuthProvider:
         )
 
     def _load(self, token: str, kinds: tuple[str, ...]) -> dict | None:
-        if self._owner is None:
-            return None
         with self._lock:
             row = self._db.execute(
                 "SELECT kind, family, client_id, scopes, expires_at, resource, subject "
                 f"FROM tokens WHERE token_hash = ? AND kind IN ({','.join('?' * len(kinds))}) "
-                "AND expires_at > ? AND subject = ? "
-                "AND EXISTS (SELECT 1 FROM auth_state WHERE id = 1 AND owner = ?)",
-                (_hash(token), *kinds, int(time.time()), self._owner, self._owner),
+                "AND expires_at > ?",
+                (_hash(token), *kinds, int(time.time())),
             ).fetchone()
         if row is None:
             return None
         kind, family, client_id, scopes, expires_at, resource, subject = row
+        if subject is None or not self.is_allowed(subject):
+            return None
         return dict(
             kind=kind, family=family, client_id=client_id, scopes=json.loads(scopes),
             expires_at=expires_at, resource=resource, subject=subject,

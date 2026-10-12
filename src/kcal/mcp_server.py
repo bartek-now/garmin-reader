@@ -1,9 +1,11 @@
 """MCP server exposing Garmin daily steps/calories/weight as a tool.
 
 Runs over stdio by default, or over Streamable HTTP with `--http` (see
-docs/http-server-design.md). Login is non-interactive: run `kcal fetch` once
-in a terminal first so the session token (and any MFA code) is cached under
-KCAL_STATE_DIR (default ~/.kcal).
+docs/http-server-design.md). Over stdio, login is non-interactive: run
+`kcal fetch` once in a terminal first so the session token (and any MFA
+code) is cached under KCAL_STATE_DIR (default ~/.kcal). Over HTTP, each
+allowed user signs in to Garmin on the /login page and gets their own
+session.
 """
 
 from __future__ import annotations
@@ -13,12 +15,13 @@ import functools
 import hashlib
 import inspect
 import os
+import shutil
 import subprocess
 import sys
 import threading
 from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -30,6 +33,7 @@ from garminconnect import (
     GarminConnectConnectionError,
     GarminConnectTooManyRequestsError,
 )
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
@@ -38,9 +42,16 @@ from kcal import endpoints, summary
 from kcal.auth import GarminLoginError, garmin_profile_id, is_refresh_unavailable, login
 from kcal.daily import resolve_days
 from kcal.http_log import LogClientErrors
-from kcal.login_page import LoginPage
+from kcal.login_page import GarminGateway, LoginPage
 from kcal.oauth import KcalOAuthProvider, auth_settings
-from kcal.settings import HttpSettings, garmin_token_store, state_dir
+from kcal.settings import (
+    HttpSettings,
+    normalize_email,
+    parse_allowed_emails,
+    state_dir,
+    user_token_store,
+    users_dir,
+)
 
 # Filled by @_tool; build_server() registers them on each FastMCP instance.
 _TOOLS = []
@@ -52,9 +63,13 @@ class _Exposure:
 
     allowed: frozenset[str] | None  # endpoint names without `get_`; None = all
     scrub: Callable[[Any], Any]
-    # Where the owner refreshes an expired Garmin session (HTTP with OAuth).
+    # Where users refresh an expired Garmin session (HTTP with OAuth).
     login_url: str | None = None
-    owner_id: int | None = None
+    # HTTP with OAuth: each call uses the Garmin session of the user its
+    # token belongs to; this gives that user's Garmin profile and the
+    # revision of its stored session (None if they never signed in to
+    # Garmin or aren't allowed any more).
+    garmin_session: Callable[[str], tuple[int, str] | None] | None = None
 
 
 LOCAL = _Exposure(allowed=None, scrub=lambda result: result)
@@ -62,6 +77,8 @@ REMOTE = _Exposure(allowed=endpoints.REMOTE_ALLOWED, scrub=endpoints.strip_priva
 # Fails closed: code running outside a tool wrapper gets the remote rules.
 # stdio tools unlock LOCAL explicitly in _wrap().
 _exposure: ContextVar[_Exposure] = ContextVar("kcal_exposure", default=REMOTE)
+# The signed-in user (lowercase email) a tool call runs for, from its token.
+_user: ContextVar[str | None] = ContextVar("kcal_user", default=None)
 
 _SRC = Path(__file__).resolve().parent
 
@@ -89,53 +106,139 @@ _LOADED_HASH = _code_hash()
 _LOADED_COMMIT = _git_commit()
 _STARTED = datetime.now().astimezone().isoformat(timespec="seconds")
 
+# The one Garmin session of the local (stdio) server and of HTTP servers
+# without sign-in (tests).
 _api = None
-_verified_api: tuple[Any, int] | None = None
 _api_lock = threading.Lock()
 
 
-def _get_api():
-    """Log in once per server process and reuse the session. Tools run in
-    worker threads, so concurrent first calls must not both log in.
+@dataclass
+class _ProfileSession:
+    """One Garmin profile's loaded session (HTTP with OAuth). Kept per
+    profile, not per email: two emails of one account (its login email
+    changed) must share it, or each would rotate the other's refresh token.
     """
-    global _api, _verified_api
+
+    api: Any = None
+    revision: str | None = None  # of the stored session `api` was loaded from
+    verified: bool = False  # `api` checked to be this profile's
+    # Tools run in worker threads: concurrent first calls mustn't both log in.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+_profile_sessions: dict[int, _ProfileSession] = {}
+_profile_sessions_lock = threading.Lock()
+
+
+def _get_api():
+    """The Garmin session for the current call, logged in once and reused."""
+    exposure = _exposure.get()
+    if exposure.garmin_session is not None:
+        return _user_api(exposure)
+    global _api
     with _api_lock:
         if _api is None:
             try:
                 _api = login(prompt_mfa=_no_mfa)
             except Exception as err:
                 raise _login_error(err) from err
-        owner = _exposure.get().owner_id
-        if owner is not None and (_verified_api is None
-                                  or _verified_api[0] is not _api
-                                  or _verified_api[1] != owner):
-            try:
-                actual_owner = garmin_profile_id(_api)
-            except GarminConnectAuthenticationError as err:
-                _api = None
-                _verified_api = None
-                raise _login_error(err) from err
-            except Exception as err:
-                raise _login_error(err) from err
-            if actual_owner != owner:
-                _api = None
-                _verified_api = None
-                raise GarminLoginError(
-                    "The stored Garmin session belongs to a different account. "
-                    f"Open {_exposure.get().login_url} and sign in as this server's owner."
-                )
-            _verified_api = (_api, owner)
         return _api
 
 
-def _reset_api() -> None:
-    """Forget the cached Garmin session (new tokens were saved, or Garmin
-    rejected the current ones); the next call logs in again.
+def _user_api(exposure: _Exposure):
+    """The current user's own Garmin session, never anyone else's: it's
+    loaded from their profile's token store, reloaded whenever that store
+    was replaced (a sign-in or import, in any process), and checked to be
+    that profile before its first use.
     """
-    global _api, _verified_api
+    user = _user.get()
+    if user is None:
+        # Fails closed: a call with no user never falls back to a session.
+        raise GarminLoginError("This request isn't signed in to kcal.")
+    while True:
+        link = exposure.garmin_session(user)
+        if link is None:
+            raise GarminLoginError(garmin_expired_message(exposure.login_url))
+        with _profile_sessions_lock:
+            session = _profile_sessions.setdefault(link[0], _ProfileSession())
+        with session.lock:
+            # Again now that it's this call's turn: a sign-in, or another
+            # call reloading, may have happened while it waited.
+            current = exposure.garmin_session(user)
+            if current is None:
+                raise GarminLoginError(garmin_expired_message(exposure.login_url))
+            if current[0] == link[0]:
+                return _load_session(exposure, session, *current)
+        # The user moved to another Garmin account meanwhile: that one's lock.
+
+
+def _load_session(exposure: _Exposure, session: _ProfileSession, profile: int, revision: str):
+    """`session`'s client for the stored session at `revision`, loaded and
+    checked if needed. Called with session.lock held.
+    """
+    if session.api is None or session.revision != revision:
+        # The old client mustn't keep running: its refreshes would
+        # overwrite the newly stored tokens.
+        session.api, session.revision, session.verified = None, None, False
+        try:
+            api = login(
+                token_store=user_token_store(profile), prompt_mfa=_no_mfa,
+                env_credentials=False,
+            )
+        except Exception as err:
+            raise _login_error(err) from err
+        session.api, session.revision = api, revision
+    if not session.verified:
+        try:
+            actual = garmin_profile_id(session.api)
+        except GarminConnectAuthenticationError as err:
+            session.api = None
+            raise _login_error(err) from err
+        except Exception as err:
+            raise _login_error(err) from err
+        if actual != profile:
+            session.api = None
+            raise GarminLoginError(
+                "The stored Garmin session belongs to a different account. "
+                f"Open {exposure.login_url} and sign in to Garmin again."
+            )
+        session.verified = True
+    return session.api
+
+
+def _remove_unused_sessions(in_use: set[int]) -> None:
+    """Delete stored Garmin sessions no allowed user has: users who were
+    removed, an email that moved to another Garmin account, leftovers.
+    """
+    folder = users_dir()
+    if not folder.is_dir():
+        return
+    for entry in folder.iterdir():
+        if entry.is_dir() and entry.name.isdigit() and int(entry.name) not in in_use:
+            shutil.rmtree(entry, ignore_errors=True)
+            with _profile_sessions_lock:
+                _profile_sessions.pop(int(entry.name), None)
+
+
+def _reset_api() -> None:
+    """Forget the current call's cached Garmin session (Garmin rejected it);
+    the next call logs in again.
+    """
+    exposure, user = _exposure.get(), _user.get()
+    if exposure.garmin_session is not None:
+        link = exposure.garmin_session(user) if user is not None else None
+        with _profile_sessions_lock:
+            session = _profile_sessions.get(link[0]) if link is not None else None
+        if session is not None:
+            # Cleared under the profile's own lock, which stays: replacing
+            # the entry would let a second login run alongside one in
+            # progress, both rotating the same refresh token.
+            with session.lock:
+                session.api, session.revision, session.verified = None, None, False
+        return
+    global _api
     with _api_lock:
         _api = None
-        _verified_api = None
 
 
 def _login_error(err: Exception) -> GarminLoginError:
@@ -144,7 +247,7 @@ def _login_error(err: Exception) -> GarminLoginError:
         return GarminLoginError(str(err))
     if isinstance(err, (GarminConnectConnectionError, GarminConnectTooManyRequestsError)):
         # Garmin unreachable or limiting requests: passes on its own, and
-        # sending the owner to sign in would only spend sign-in attempts.
+        # sending the user to sign in would only spend sign-in attempts.
         return GarminLoginError(GARMIN_BUSY_MESSAGE)
     return GarminLoginError(garmin_expired_message(url))
 
@@ -157,7 +260,7 @@ GARMIN_BUSY_MESSAGE = (
 
 
 def garmin_expired_message(login_url: str) -> str:
-    """The only cue the owner gets, read by a model that knows nothing about
+    """The only cue the user gets, read by a model that knows nothing about
     kcal, so it says everything (design section 3).
     """
     return (
@@ -221,8 +324,9 @@ def _wrap(fn, exposure: _Exposure):
     `_exposure` holds the server's policy, and the result is scrubbed with it.
     """
 
-    def run(**kwargs):
+    def run(user, kwargs):
         token = _exposure.set(exposure)
+        user_token = _user.set(user)
         try:
             result = exposure.scrub(fn(**kwargs))
         except GarminConnectAuthenticationError as err:
@@ -235,12 +339,16 @@ def _wrap(fn, exposure: _Exposure):
             # A temporary refresh failure doesn't invalidate the session.
             raise RuntimeError(GARMIN_BUSY_MESSAGE) from err
         finally:
+            _user.reset(user_token)
             _exposure.reset(token)
         return endpoints.to_json(endpoints.cap_size(result))
 
     @functools.wraps(fn)
     async def wrapper(**kwargs):
-        return await anyio.to_thread.run_sync(functools.partial(run, **kwargs))
+        # The user the request's OAuth token belongs to (None without sign-in).
+        access = get_access_token()
+        user = access.subject if access is not None else None
+        return await anyio.to_thread.run_sync(run, user, kwargs)
 
     return wrapper
 
@@ -379,9 +487,10 @@ def build_server(
             ),
         )
     if oauth is not None:
-        if http is None or http.garmin_owner is None:
-            raise ValueError("OAuth needs HTTP settings with the public URL and Garmin owner")
-        oauth.configure_owner(http.garmin_owner)
+        if http is None or not http.allowed_emails:
+            raise ValueError("OAuth needs HTTP settings with the public URL and allowed emails")
+        oauth.configure_allowed(http.allowed_emails)
+        _remove_unused_sessions(oauth.garmin_profiles())
         kwargs.update(auth_server_provider=oauth, auth=auth_settings(http.public_url))
     server = FastMCP("kcal", **kwargs)
     if http is not None:
@@ -389,11 +498,12 @@ def build_server(
     exposure = LOCAL if http is None else REMOTE
     if oauth is not None:
         page = LoginPage(
-            oauth, http.garmin_owner, garmin_token_store(), on_login=_reset_api,
-            secure_cookie=http.public_url.startswith("https://"),
+            oauth, user_token_store, secure_cookie=http.public_url.startswith("https://"),
         )
         server.custom_route("/login", methods=["GET", "POST"])(page.handle)
-        exposure = replace(REMOTE, login_url=f"{http.public_url}/login", owner_id=http.garmin_owner)
+        exposure = replace(
+            REMOTE, login_url=f"{http.public_url}/login", garmin_session=oauth.garmin_session
+        )
     for fn in _TOOLS:
         tool = _wrap(fn, exposure)
         if customize := getattr(fn, "customize", None):
@@ -457,9 +567,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "0.0.0.0 in a container)",
     )
     parser.add_argument(
-        "--garmin-owner", metavar="ID",
-        help="Garmin profile ID allowed to sign in (default: $KCAL_GARMIN_OWNER; "
-        "`kcal whoami` prints yours)",
+        "--allowed-emails", metavar="EMAILS",
+        help="Garmin login emails allowed to sign in, comma-separated "
+        "(default: $KCAL_ALLOWED_EMAILS)",
+    )
+    parser.add_argument(
+        "--import-garmin-session", nargs=2, metavar=("EMAIL", "FOLDER"),
+        help="Store the Garmin session in FOLDER (garmin_tokens.json, e.g. from "
+        "`kcal fetch`) as EMAIL's, for when Garmin refuses sign-ins from the "
+        "server's address; then exit. EMAIL must be allowed",
     )
     parser.add_argument(
         "--revoke-all", action="store_true",
@@ -473,19 +589,20 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.revoke_all:
         return _revoke_all()
+    if args.import_garmin_session:
+        return _import_garmin_session(*args.import_garmin_session, args.allowed_emails)
     if not args.http:
         mcp.run()
         return 0
     try:
         http = HttpSettings.from_env(
-            public_url=args.public_url, port=args.port, garmin_owner=args.garmin_owner,
+            public_url=args.public_url, port=args.port, allowed_emails=args.allowed_emails,
             host=args.host,
         )
-        if http.garmin_owner is None:
+        if not http.allowed_emails:
             raise ValueError(
-                "HTTP mode needs the Garmin account allowed to sign in: set "
-                "KCAL_GARMIN_OWNER or pass --garmin-owner (run `kcal whoami` to "
-                "get your profile ID)"
+                "HTTP mode needs the Garmin emails allowed to sign in: set "
+                "KCAL_ALLOWED_EMAILS or pass --allowed-emails"
             )
     except ValueError as e:
         print(f"kcal-mcp: {e}", file=sys.stderr)
@@ -493,10 +610,52 @@ def main(argv: list[str] | None = None) -> int:
     oauth = KcalOAuthProvider(state_dir() / "mcp_auth.sqlite", http.public_url)
     print(
         f"kcal-mcp: serving {http.public_url}/mcp from {http.host}:{http.port}; "
-        f"clients sign in at {http.public_url}/login",
+        f"{len(http.allowed_emails)} user(s) may sign in at {http.public_url}/login",
         file=sys.stderr,
     )
     serve_http(build_server(http, oauth))
+    return 0
+
+
+def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) -> int:
+    """For when Garmin refuses sign-ins from the server's address: a session
+    signed in elsewhere becomes one allowed user's own, as if they had
+    signed in on /login. A running server reloads it at the user's next
+    call: the import gives that profile's stored session a new revision.
+    """
+    try:
+        allowed = parse_allowed_emails(
+            allowed_emails if allowed_emails is not None else os.environ.get("KCAL_ALLOWED_EMAILS")
+        )
+    except ValueError as e:
+        print(f"kcal-mcp: {e}", file=sys.stderr)
+        return 2
+    user = normalize_email(email)
+    if user not in allowed:
+        print(f"kcal-mcp: {user} isn't in KCAL_ALLOWED_EMAILS.", file=sys.stderr)
+        return 2
+    try:
+        api = login(token_store=Path(folder), prompt_mfa=_no_mfa, env_credentials=False)
+        profile = garmin_profile_id(api)
+        # As for a sign-in: never replace the user's session with one that
+        # can't be renewed.
+        GarminGateway().save(api, user_token_store(profile))
+    except Exception as err:
+        print(f"kcal-mcp: couldn't use the Garmin session in {folder}: {err}", file=sys.stderr)
+        return 1
+    provider = KcalOAuthProvider(state_dir() / "mcp_auth.sqlite", public_url="")
+    try:
+        # The same allowlist as the server's, so this changes nothing else.
+        provider.configure_allowed(allowed)
+        if (previous := provider.set_garmin_profile(user, profile)) is not None:
+            shutil.rmtree(user_token_store(previous).parent, ignore_errors=True)
+    finally:
+        provider.close()
+    print(
+        f"kcal-mcp: stored the Garmin session as {user}'s (Garmin profile {profile}). "
+        "Don't use the original copy elsewhere any more: it would sign this one out.",
+        file=sys.stderr,
+    )
     return 0
 
 

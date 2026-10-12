@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from collections import deque
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -18,12 +19,16 @@ from starlette.testclient import TestClient
 
 from kcal import cli, login_page, mcp_server
 from kcal.oauth import KcalOAuthProvider
-from kcal.settings import HttpSettings
+from kcal.settings import HttpSettings, user_token_store
+from signed_in import as_user
 
 PUBLIC = "https://abc-def.trycloudflare.com"
 REDIRECT = "https://claude.ai/api/mcp/auth_callback"
-OWNER = 12345
-EMAIL, PASSWORD = "owner@example.com", "hunter2-secret"
+OWNER = 12345  # EMAIL's Garmin profile
+EMAIL, PASSWORD = "me@example.com", "hunter2-secret"
+FRIEND, FRIEND_PROFILE = "friend@example.com", 777
+STRANGER = "other@example.com"  # a real Garmin account, but not on the list
+ALLOWED = frozenset({EMAIL, FRIEND, "mfa@example.com"})
 
 
 class FakeGarmin:
@@ -31,8 +36,9 @@ class FakeGarmin:
 
     accounts = {
         EMAIL: (PASSWORD, OWNER, None),
-        "mfa@example.com": (PASSWORD, OWNER, "123456"),
-        "other@example.com": (PASSWORD, 999, None),
+        FRIEND: (PASSWORD, FRIEND_PROFILE, None),
+        "mfa@example.com": (PASSWORD, 4242, "123456"),
+        STRANGER: (PASSWORD, 999, None),
     }
 
     def __init__(self):
@@ -98,13 +104,31 @@ def provider(state):
 
 @pytest.fixture
 def server(garmin, provider):
-    return mcp_server.build_server(HttpSettings(public_url=PUBLIC, garmin_owner=OWNER), provider)
+    return mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=ALLOWED), provider)
 
 
 @pytest.fixture
 def client(server):
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         yield c
+
+
+@pytest.fixture
+def as_me(server, provider):
+    """Tool calls run as EMAIL, who has signed in to Garmin before."""
+    provider.set_garmin_profile(EMAIL, OWNER)
+    with as_user(EMAIL):
+        yield
+
+
+def make_page(provider, garmin):
+    """A login page set up as the server sets it up."""
+    provider.configure_allowed(ALLOWED)
+    return login_page.LoginPage(provider, user_token_store, garmin)
+
+
+def tokens_of(state, profile=OWNER):
+    return state / "users" / str(profile) / "garmin_tokens"
 
 
 def query(url):
@@ -155,7 +179,7 @@ def test_form_shows_who_is_asking(client):
     r, csrf = open_form(client, req)
     assert r.status_code == 200
     assert "<b>Claude</b> wants read access" in r.text
-    assert "<b>claude.ai</b>" in r.text  # where the owner will be sent back
+    assert "<b>claude.ai</b>" in r.text  # where the user will be sent back
     assert 'value="deny"' in r.text and csrf
 
 
@@ -191,19 +215,22 @@ def test_direct_form_is_for_refreshing(client):
 # --- signing in to connect a client ---------------------------------------------------
 
 
-def test_owner_sign_in_completes_oauth(client, garmin, state):
+def test_sign_in_completes_oauth(client, garmin, state, provider):
     client_id, req = start_authorization(client)
     r = sign_in(client, req)
     assert r.status_code == 303
     back = r.headers["location"]
     assert back.startswith(REDIRECT) and query(back)["state"] == "st4te"
-    assert (state / "garmin_tokens" / "saved.json").exists()
-    # The code works, and the token belongs to the owner.
+    assert (tokens_of(state) / "saved.json").exists()
+    assert provider.garmin_profile(EMAIL) == OWNER
+    # The code works, and the token belongs to the user.
     tokens = client.post("/token", data={
         "grant_type": "authorization_code", "code": query(back)["code"],
         "redirect_uri": REDIRECT, "client_id": client_id,
         "code_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
     }).json()
+    loaded = asyncio.run(provider.load_access_token(tokens["access_token"]))
+    assert loaded.subject == EMAIL
     r = client.post("/mcp", content=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
                     headers={"Authorization": f"Bearer {tokens['access_token']}",
                              "Content-Type": "application/json",
@@ -211,11 +238,32 @@ def test_owner_sign_in_completes_oauth(client, garmin, state):
     assert r.status_code == 200
 
 
-def test_sign_in_resets_cached_session(client, monkeypatch):
-    monkeypatch.setattr(mcp_server, "_api", object())
-    _, req = start_authorization(client)
-    sign_in(client, req)
-    assert mcp_server._api is None  # next tool call loads the new tokens
+def test_sign_in_gives_only_that_profile_a_new_revision(client, provider):
+    sign_in(client)
+    sign_in(client, email=FRIEND)
+    mine, friends = provider.garmin_session(EMAIL), provider.garmin_session(FRIEND)
+    sign_in(client)
+    # The server reloads EMAIL's session at the next call; FRIEND's stays.
+    assert provider.garmin_session(EMAIL)[1] != mine[1]
+    assert provider.garmin_session(FRIEND) == friends
+
+
+def test_email_is_matched_regardless_of_case(client, garmin, provider):
+    client_id, req = start_authorization(client)
+    r = sign_in(client, req, email="  Me@Example.COM ")
+    assert r.status_code == 303
+    assert garmin.calls == [("start", EMAIL)]
+    assert provider.garmin_profile(EMAIL) == OWNER
+
+
+def test_each_user_gets_their_own_session(client, garmin, state, provider):
+    assert "Garmin session refreshed" in sign_in(client).text
+    assert "Garmin session refreshed" in sign_in(client, email=FRIEND).text
+    assert json.loads((tokens_of(state) / "saved.json").read_text())["email"] == EMAIL
+    friend = json.loads((tokens_of(state, FRIEND_PROFILE) / "saved.json").read_text())
+    assert friend["email"] == FRIEND
+    assert provider.garmin_profile(EMAIL) == OWNER
+    assert provider.garmin_profile(FRIEND) == FRIEND_PROFILE
 
 
 def test_mfa_sign_in(client, garmin):
@@ -302,7 +350,7 @@ def test_different_codes_reach_garmin_one_at_a_time(garmin, provider, state):
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
     running, overlaps = [], []
     original = garmin.finish
@@ -356,11 +404,13 @@ def test_wrong_password(client, garmin, provider):
     assert provider.pending(req) is not None  # still waiting
 
 
-def test_other_garmin_account_is_refused(client, garmin, state, provider):
+def test_email_not_on_the_list_is_refused_before_garmin(client, garmin, state, provider):
     _, req = start_authorization(client)
-    r = sign_in(client, req, email="other@example.com")
-    assert r.status_code == 200 and "isn't the one this server belongs to" in r.text
-    assert not (state / "garmin_tokens").exists()
+    r = sign_in(client, req, email=STRANGER)
+    assert r.status_code == 200 and "isn't allowed to use this server" in r.text
+    assert garmin.calls == []  # the password never reached Garmin
+    assert not (state / "users").exists()
+    assert provider.garmin_profile(STRANGER) is None
     assert provider.pending(req) is not None
 
 
@@ -387,7 +437,7 @@ def test_expired_request_at_sign_in(client, garmin, provider):
 def test_direct_sign_in_refreshes_garmin_only(client, state, provider):
     r = sign_in(client)
     assert r.status_code == 200 and "Garmin session refreshed" in r.text
-    assert (state / "garmin_tokens" / "saved.json").exists()
+    assert (tokens_of(state) / "saved.json").exists()
     assert provider._codes == {}  # no OAuth code issued
 
 
@@ -412,19 +462,22 @@ def test_post_with_mismatched_csrf_is_refused(client, garmin):
 # --- rate limiting --------------------------------------------------------------------
 
 
-def test_failures_are_capped_for_everyone(client, garmin):
+def test_failures_are_capped_per_email(client, garmin):
     for _ in range(login_page.MAX_FAILURES):
         sign_in(client, password="wrong")
     starts = len(garmin.calls)
     r = sign_in(client)  # even the right password
     assert r.status_code == 429 and "paused" in r.text
     assert len(garmin.calls) == starts  # Garmin never contacted
+    # Someone else's typos don't lock this user out.
+    assert "Garmin session refreshed" in sign_in(client, email=FRIEND).text
 
 
-def test_wrong_account_counts_as_failure(client, garmin):
-    for _ in range(login_page.MAX_FAILURES):
-        sign_in(client, email="other@example.com")
-    assert sign_in(client).status_code == 429
+def test_emails_not_on_the_list_lock_nobody_out(client, garmin):
+    for _ in range(login_page.MAX_FAILURES + 1):
+        sign_in(client, email=STRANGER)
+    assert garmin.calls == []
+    assert "Garmin session refreshed" in sign_in(client).text
 
 
 def test_failures_expire_after_the_window(client, garmin, monkeypatch):
@@ -460,7 +513,6 @@ def test_garmin_rate_limit_is_counted(client, garmin):
 def failing_login(monkeypatch):
     def fail(**_):
         raise GarminConnectAuthenticationError("token expired")
-    monkeypatch.setattr(mcp_server, "_api", None)
     monkeypatch.setattr(mcp_server, "login", fail)
 
 
@@ -478,7 +530,7 @@ def tool_error(server, name, args):
         ("call_garmin_endpoint", {"endpoint": "get_sleep_data", "args": {"cdate": "d"}}),
     ],
 )
-def test_expired_garmin_session_says_what_to_do(server, failing_login, tool, args):
+def test_expired_garmin_session_says_what_to_do(server, as_me, failing_login, tool, args):
     message = tool_error(server, tool, args)
     assert "Garmin session expired" in message  # what happened
     assert "Nothing is wrong with the connector" in message
@@ -533,12 +585,14 @@ class ExpiredSession:
                                 "metrics": ["heart"]}),
     ],
 )
-def test_session_rejected_mid_call(server, monkeypatch, tool, args):
-    monkeypatch.setattr(mcp_server, "_api", ExpiredSession())
+def test_session_rejected_mid_call(server, provider, as_me, tool, args):
+    mcp_server._profile_sessions[OWNER] = mcp_server._ProfileSession(
+        api=ExpiredSession(), revision=provider.garmin_session(EMAIL)[1], verified=True
+    )
     message = tool_error(server, tool, args)
     assert "Garmin session expired" in message
     assert f"open {PUBLIC}/login" in message
-    assert mcp_server._api is None  # the dead session is dropped
+    assert mcp_server._profile_sessions[OWNER].api is None  # the dead session is dropped
 
 
 # --- kcal whoami ----------------------------------------------------------------------
@@ -602,7 +656,7 @@ def test_parallel_attempts_cannot_exceed_the_cap(garmin, provider, state):
         return original(email, password)
 
     garmin.start = slow_start
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
 
     async def attack():
@@ -626,11 +680,11 @@ def test_lockout_keeps_a_waiting_mfa_step(garmin, provider, state):
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
     with TestClient(app, base_url=PUBLIC) as c:
         flow = flow_id(sign_in(c, email="mfa@example.com").text)
-        page._failures.extend([time.time()] * login_page.MAX_FAILURES)
+        page._failures["mfa@example.com"] = deque([time.time()] * login_page.MAX_FAILURES)
         data = {"csrf": c.cookies.get(login_page.CSRF_COOKIE), "flow": flow,
                 "code": "123456", "action": "mfa"}
         assert c.post("/login", data=data).status_code == 429
@@ -646,7 +700,7 @@ def test_incomplete_session_is_not_saved(client, garmin, state):
     garmin.save = save
     r = sign_in(client)
     assert "didn't issue a session kcal can keep" in r.text
-    assert not (state / "garmin_tokens").exists()
+    assert not (state / "users").exists()
 
 
 def test_real_gateway_refuses_session_without_refresh_token(tmp_path):
@@ -675,7 +729,7 @@ def test_unwritable_token_store_is_explained(client, garmin):
 def test_cookie_not_secure_on_plain_http(garmin, state):
     p = KcalOAuthProvider(state / "a.sqlite", "http://localhost:8000")
     server = mcp_server.build_server(
-        HttpSettings(public_url="http://localhost:8000", garmin_owner=OWNER), p
+        HttpSettings(public_url="http://localhost:8000", allowed_emails=ALLOWED), p
     )
     with TestClient(server.streamable_http_app(), base_url="http://localhost:8000") as c:
         r = c.get("/login")
@@ -686,11 +740,10 @@ def test_cookie_not_secure_on_plain_http(garmin, state):
 @pytest.mark.parametrize(
     "error", [GarminConnectConnectionError("timeout"), GarminConnectTooManyRequestsError("429")]
 )
-def test_garmin_outage_is_not_reported_as_expired(server, monkeypatch, error):
+def test_garmin_outage_is_not_reported_as_expired(server, as_me, monkeypatch, error):
     def fail(**_):
         raise error
 
-    monkeypatch.setattr(mcp_server, "_api", None)
     monkeypatch.setattr(mcp_server, "login", fail)
     message = tool_error(server, "get_garmin_day", {"date": "2026-10-05"})
     assert "try again in a few minutes" in message
@@ -721,7 +774,7 @@ def test_concurrent_double_submit_waits_for_the_first(garmin, provider, state):
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
     release = threading.Event()
     original = garmin.finish
@@ -841,7 +894,7 @@ def test_completing_an_expired_request_is_refused(client, provider, monkeypatch)
     later = time.time() + oauth.PENDING_SECONDS + 1
     monkeypatch.setattr(oauth.time, "time", lambda: later)
     with pytest.raises(KeyError):
-        provider.complete_authorization(req, "owner")
+        provider.complete_authorization(req, EMAIL)
     assert provider.expired(req) is not None  # still there for the way back
 
 
@@ -863,13 +916,13 @@ def mcp_tool_call(client, token, name, arguments):
 
 
 def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
-    """Connected client; Garmin then logs the owner out; the tool says where
-    to sign in; the owner signs in at that link; the same client, with the
+    """Connected client; Garmin then logs the user out; the tool says where
+    to sign in; the user signs in at that link; the same client, with the
     same token, works again. Garmin itself is faked: its tokens are valid
     while their generation matches Garmin's current one.
     """
     garmin_side = {"generation": 1}
-    token_file = state / "garmin_tokens" / "saved.json"
+    token_file = tokens_of(state) / "saved.json"
 
     def save(session, token_store):  # what /login stores after a sign-in
         token_store.mkdir(parents=True, exist_ok=True)
@@ -894,7 +947,8 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
                 raise GarminConnectAuthenticationError("401 Unauthorized")
             return {"dailySleepDTO": {"calendarDate": cdate, "sleepTimeSeconds": 25000}}
 
-    def login(**_):  # what the server does to load the stored tokens
+    def login(token_store, **_):  # what the server does to load the stored tokens
+        assert token_store == tokens_of(state)  # this user's own session
         if not token_file.exists():
             raise GarminConnectAuthenticationError("no tokens")
         session = Session(json.loads(token_file.read_text())["generation"])
@@ -902,7 +956,6 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
         return session
 
     monkeypatch.setattr(mcp_server, "login", login)
-    monkeypatch.setattr(mcp_server, "_api", None)
     ask = {"date": "2026-10-05", "metrics": ["sleep_data"]}
 
     # 1. Connect Claude: authorize, sign in to Garmin, exchange the code.
@@ -916,7 +969,7 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
     is_error, text = mcp_tool_call(client, tokens["access_token"], "get_garmin_day", ask)
     assert not is_error and json.loads(text)["sleep_data"]["dailySleepDTO"]["sleepTimeSeconds"]
 
-    # 2. Garmin logs the owner out (password change, security reset, ...).
+    # 2. Garmin logs the user out (password change, security reset, ...).
     garmin_side["generation"] += 1
 
     # 3. The next call explains what to do, with the link.
@@ -928,7 +981,7 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
     is_error, _ = mcp_tool_call(client, tokens["access_token"], "get_garmin_day", ask)
     assert is_error
 
-    # 4. The owner opens the link and signs in to Garmin again.
+    # 4. The user opens the link and signs in to Garmin again.
     r = client.get(urlsplit(link).path)
     assert "refresh kcal's Garmin session" in r.text
     r = sign_in(client)
@@ -940,25 +993,25 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
 
 
 @pytest.mark.parametrize("mfa", [False, True])
-def test_slow_owner_checks_still_reserve_attempt_slots(garmin, provider, state, mfa):
+def test_slow_profile_checks_still_reserve_attempt_slots(garmin, provider, state, mfa):
     import queue
     import threading
     import httpx
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    garmin.accounts = {**garmin.accounts, "other-mfa@example.com": (PASSWORD, 999, "123456")}
+    user = "mfa@example.com" if mfa else EMAIL
     release = threading.Event()
     entered = queue.Queue()
-    original = garmin.profile_id
 
-    def slow_profile(session):
+    def slow_failing_profile(session):
+        # Garmin signed the user in, but then refuses the profile lookup.
         entered.put(True)
         assert release.wait(10), "test did not release profile lookup"
-        return original(session)
+        raise GarminConnectAuthenticationError("401 Unauthorized")
 
-    garmin.profile_id = slow_profile
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    garmin.profile_id = slow_failing_profile
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
 
     async def run():
@@ -966,9 +1019,9 @@ def test_slow_owner_checks_still_reserve_attempt_slots(garmin, provider, state, 
                                      cookies={login_page.CSRF_COOKIE: "t"}) as c:
             submissions = []
             for _ in range(login_page.MAX_FAILURES + 1):
-                data = {"csrf": "t", "email": "other@example.com", "password": PASSWORD}
+                data = {"csrf": "t", "email": user, "password": PASSWORD}
                 if mfa:
-                    r = await c.post("/login", data={**data, "email": "other-mfa@example.com"})
+                    r = await c.post("/login", data=data)
                     assert r.status_code == 200
                     data = {"csrf": "t", "action": "mfa", "flow": flow_id(r.text), "code": "123456"}
                 submissions.append(data)
@@ -976,16 +1029,16 @@ def test_slow_owner_checks_still_reserve_attempt_slots(garmin, provider, state, 
             try:
                 for _ in tasks:
                     await asyncio.wait_for(asyncio.to_thread(entered.get, True, 5), timeout=6)
-                assert page._in_flight == login_page.MAX_FAILURES
+                assert page._in_flight == {user: login_page.MAX_FAILURES}
                 blocked = await c.post("/login", data=submissions[-1])
                 assert blocked.status_code == 429
             finally:
                 release.set()
                 responses = await asyncio.gather(*tasks)
-            assert all(r.status_code == 200 and "isn't the one" in r.text for r in responses)
-            assert page._in_flight == 0
-            assert len(page._failures) == login_page.MAX_FAILURES
-            assert not (state / "garmin_tokens").exists()
+            assert all(r.status_code == 200 and "didn't accept" in r.text for r in responses)
+            assert page._in_flight == {}
+            assert len(page._failures[user]) == login_page.MAX_FAILURES
+            assert not (state / "users").exists()
             assert len([x for x in garmin.calls if x[0] == ("finish" if mfa else "start")]) == login_page.MAX_FAILURES
 
     asyncio.run(run())
@@ -1027,7 +1080,7 @@ def test_code_queued_past_expiry_is_refused(garmin, provider, state, monkeypatch
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
 
     async def scenario():
@@ -1051,7 +1104,7 @@ def test_code_queued_past_expiry_is_refused(garmin, provider, state, monkeypatch
     r = asyncio.run(scenario())
     assert r.status_code == 400 and "Sign-in expired" in r.text
     assert [c for c in garmin.calls if c[0] == "finish"] == []  # never reached Garmin
-    assert not (state / "garmin_tokens").exists()
+    assert not (state / "users").exists()
 
 
 
@@ -1091,7 +1144,7 @@ def test_simultaneous_retries_after_a_temporary_failure(garmin, provider, state)
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
     original = garmin.finish
 
@@ -1127,7 +1180,7 @@ def test_replay_entries_are_only_removed_by_their_owner(garmin, provider, state)
     # for themselves; one finishing must not remove the other's entry.
     from starlette.responses import HTMLResponse
 
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     runs = []
 
     async def run():
@@ -1162,7 +1215,7 @@ def test_flow_removed_during_a_failing_check_is_not_a_crash(garmin, provider, st
     from starlette.routing import Route
 
     garmin.wrong_code_closes_step = True
-    page = login_page.LoginPage(provider, OWNER, state / "garmin_tokens", lambda: None, garmin)
+    page = make_page(provider, garmin)
     app = Starlette(routes=[Route("/login", page.handle, methods=["GET", "POST"])])
     checking, release = threading.Event(), threading.Event()
     original = garmin.finish
@@ -1203,3 +1256,12 @@ def test_finished_step_is_not_replayed_after_it_expires(client, garmin, monkeypa
     for code in ("123456", "999999"):
         r = submit_code(client, flow, code, req)
         assert r.status_code == 400 and "Sign-in expired" in r.text
+
+
+def test_signing_in_with_another_account_deletes_the_old_session(client, garmin, state):
+    sign_in(client)
+    assert (tokens_of(state) / "saved.json").exists()
+    garmin.accounts = {**garmin.accounts, EMAIL: (PASSWORD, 5150, None)}  # a new account
+    assert "Garmin session refreshed" in sign_in(client).text
+    assert not tokens_of(state).parent.exists()
+    assert (tokens_of(state, 5150) / "saved.json").exists()

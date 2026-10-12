@@ -9,19 +9,20 @@ unauthenticated mode. Next: connecting the real clients (step 5). See
 ## Goal
 
 Let claude.ai (web and mobile) and ChatGPT use the kcal MCP tools, not just
-local clients over stdio, with authentication that only the owner of the
-Garmin account can pass.
+local clients over stdio, for a few allowed people, each of whom sees only
+their own Garmin data.
 
 ## Decisions
 
 | Topic | Decision |
 |---|---|
 | Transport | Streamable HTTP without MCP sessions, behind a flag. stdio stays the default. |
-| Hosting | Owner's PC behind a Cloudflare **quick tunnel** for now; code written so a move to an always-on host is a config change. |
+| Hosting | A PC behind a Cloudflare **quick tunnel** at first; code written so a move to an always-on host is a config change (now a Google Cloud VM, see deployment.md). |
 | MCP auth | OAuth 2.1 via the MCP SDK's built-in authorization server (`mcp.server.auth`), with dynamic client registration. |
-| Who may log in | Whoever completes a **Garmin login (with MFA) as the configured owner** on our `/login` page (reached via `/authorize`). No separate identity provider yet. |
+| Who may log in | Whoever completes a **Garmin login (with MFA) with an email on the allowlist** (`KCAL_ALLOWED_EMAILS`) on our `/login` page (reached via `/authorize`). Garmin accepting the password proves they own that account. No separate identity provider yet. |
+| Several users | Each user's OAuth tokens carry their email; each tool call uses only the Garmin session stored for that user, never another's or a shared one. |
 | Later | A Google (or GitHub) sign-in step in front of the Garmin form, once the hostname is stable. Optionally, URL-mode elicitation as a nicer way to open `/login`. |
-| Garmin expiry | Tool error that tells the owner exactly what to do, with a link to `/login`; no reconnecting the connector. This is the intended design, not a stopgap. |
+| Garmin expiry | Tool error that tells the user exactly what to do, with a link to `/login`; no reconnecting the connector. This is the intended design, not a stopgap. |
 | Exposure | Remotely, `call_garmin_endpoint` is limited to an **allowlist** of health/fitness endpoints, with location fields stripped. stdio is unrestricted. |
 
 ## 1. Transport
@@ -55,13 +56,13 @@ The SDK provides the OAuth endpoints (`/.well-known/oauth-authorization-server`,
 `/revoke`) and bearer-token checks on `/mcp`. We implement
 `OAuthAuthorizationServerProvider` and one `/login` page via `custom_route`.
 
-`/login` has two entry points, sharing the same form, MFA step, owner check
-and rate limit:
+`/login` has two entry points, sharing the same form, MFA step, allowlist
+check and rate limit:
 
 - **With a pending OAuth request** (`/login?req=<id>`, reached from
   `/authorize`): after the Garmin login it completes the OAuth flow.
 - **Opened directly** (the link in the expired-Garmin-session error): it only
-  replaces the stored Garmin tokens and says "done, you can retry". The MCP
+  replaces that user's stored Garmin tokens and says "done, you can retry". The MCP
   tokens are still valid, so no OAuth flow is needed. `/authorize` can't serve
   this case: it only works when started by a registered client (client ID,
   redirect URI, PKCE) and ends by handing that client a code.
@@ -69,18 +70,20 @@ and rate limit:
 Connecting a client:
 
 1. Client discovers metadata, registers itself (dynamic client registration)
-   and opens `/authorize` in the owner's browser (PKCE).
+   and opens `/authorize` in the user's browser (PKCE).
 2. `provider.authorize()` stores the pending request under a random,
    short-lived ID and returns a redirect to `/login?req=<id>`.
 3. `/login` (GET) shows a form: Garmin email + password.
-4. `/login` (POST) logs in with `Garmin(..., return_on_mfa=True)`.
+4. `/login` (POST) refuses an email that isn't on the allowlist (compared
+   lowercase) without contacting Garmin. Otherwise it logs in with
+   `Garmin(..., return_on_mfa=True)`.
    - MFA required → keep the half-finished login state in memory under the
      request ID (a few minutes, never on disk) and show an MFA-code form.
      The second POST calls `resume_login(state, code)`. After a wrong code
      Garmin keeps the step open, so the form is shown again with the error
      (each wrong code counts toward the failure limit); if Garmin has closed
-     the step, the owner starts over. If Garmin couldn't be reached while
-     checking the code, the owner is told so, it isn't counted as a failed
+     the step, the user starts over. If Garmin couldn't be reached while
+     checking the code, the user is told so, it isn't counted as a failed
      attempt, and the same code can simply be sent again. One code at a time is checked per
      step, and expiry is checked again when a waiting submission's turn
      comes. A repeat of the same wrong code is replayed rather than sent
@@ -88,22 +91,25 @@ Connecting a client:
      rate-limiting) the same code is really tried again. Once the step has
      succeeded, any submission for it gets that success. The form links to
      "Start over".
-5. On success: check the session's Garmin profile ID equals
-   `KCAL_GARMIN_OWNER`. If not, discard the session and fail.
-6. Save the Garmin tokens to the token store, replace the server's cached
-   Garmin session, issue an authorization code and redirect to the client's
-   `redirect_uri`. The client exchanges it at `/token`.
+5. On success: look up the session's Garmin profile ID, save the tokens to
+   that profile's own store (`KCAL_STATE_DIR/users/<profile ID>/`) and
+   record the email's profile in the database.
+6. Drop that user's cached Garmin session, issue an authorization code for
+   the email and redirect to the client's `redirect_uri`. The client
+   exchanges it at `/token`.
 
 Rules for the login page:
 
 - The password lives only in the request handler's memory: never logged,
   never stored, never echoed back into the form.
-- **Rate limit:** at most 5 failed Garmin attempts per hour (global, not per
-  IP, since everything arrives through the tunnel), then refuse until the
-  window passes. Failed attempts reach Garmin, which can lock or throttle the
-  account; this is what protects it.
-  In-flight attempts keep their slots through profile lookup and owner
-  validation, including after the MFA step.
+- **Rate limit:** at most 5 failed Garmin attempts per hour per email (not
+  per IP, since everything may arrive through one tunnel or proxy), then
+  refuse until the window passes. Failed attempts reach Garmin, which can
+  lock or throttle the account; this is what protects it. Per email, one
+  user's typos don't lock the others out; emails not on the allowlist never
+  reach Garmin, so they aren't counted.
+  In-flight attempts keep their slots through the profile lookup, including
+  after the MFA step.
 - The pending request expires after 10 minutes; codes are single-use and
   expire after 5 minutes.
 - Basic hardening: CSRF token in the form, `Cache-Control: no-store`,
@@ -121,30 +127,46 @@ put in front later without restructuring it.
 | Authorization code | 5 minutes, single use | |
 
 All stored in one SQLite file (`KCAL_STATE_DIR/mcp_auth.sqlite`): registered
-clients, refresh tokens, access tokens (hashed). Moving hosts = copying this
-file; skipping the copy costs one reconnect per client.
+clients, refresh tokens, access tokens (hashed), and each user's Garmin
+profile. Moving hosts = copying this file and `users/`; skipping the copy
+costs one reconnect per client.
 
-The database also records the configured owner and a revocation generation.
-Changing owners deletes existing tokens and advances the generation. Pending
-sign-ins and authorization codes carry their starting generation, and token
-issuance checks it in the same SQLite transaction as the write. `--revoke-all`
-advances that generation too, so a separate CLI process can invalidate codes
-and pending sign-ins held in the running server's memory. Existing databases
-are migrated on startup; tokens for the unchanged owner remain valid.
+Every token's subject is its user's email. Only allowed users get codes or
+tokens, and a token whose user isn't allowed doesn't load, even if it is
+still in the database. On startup, tokens and profiles of users no longer
+allowed are deleted, along with every stored Garmin session no allowed user
+has; so are tokens from the single-owner version, whose subject was a
+Garmin profile ID. When an email signs in to (or imports) a different
+Garmin account, its previous account's stored session is deleted at once,
+unless another allowed email still uses it.
 
-Each loaded Garmin session is checked against the configured owner before
-any tool can read health data. A newly loaded session must be checked again.
+The database also records a revocation generation. Pending sign-ins and
+authorization codes carry their starting generation, and token issuance
+checks it in the same SQLite transaction as the write. `--revoke-all`
+advances that generation, so a separate CLI process can invalidate codes and
+pending sign-ins held in the running server's memory.
+
+Each tool call reads the user from its access token and uses only that
+user's Garmin session, loaded from their profile's store. A call without a
+user fails rather than falling back to any session. Loaded sessions are
+cached per Garmin profile, not per email, so two emails of one account
+(after a login-email change) don't each rotate the other's refresh token.
+Each profile's stored session has a revision in the database, renewed by
+every sign-in or `--import-garmin-session`; a call whose revision differs
+from the cached one reloads first, even if another process made the change.
+Each loaded session is checked to be the user's Garmin profile before any
+tool can read health data, and checked again whenever it's reloaded.
 
 ## 3. Expired credentials
 
-| Situation | Server response | What the owner sees |
+| Situation | Server response | What the user sees |
 |---|---|---|
 | MCP access token expired | 401 | Nothing; the client refreshes it. |
 | MCP refresh failed / revoked | 401 with `WWW-Authenticate: Bearer error="invalid_token", error_description=…, resource_metadata=…` | The client's own "reconnect" prompt. The description is filled in but clients don't show it, so it's not relied on. |
 | **Garmin tokens expired or revoked** | Normal tool result, `isError: true` | The model relays: *"Garmin session expired. Open https://…/login, sign in, then ask again."* |
 | Garmin unreachable or rate-limiting | Normal tool result, `isError: true` | "Try again in a few minutes", with no login link: signing in again wouldn't help and would spend sign-in attempts. |
 
-The Garmin-expiry error is the owner's only cue, so it must be actionable on
+The Garmin-expiry error is the user's only cue, so it must be actionable on
 its own, read by a model that knows nothing about kcal:
 
 - say what happened (the Garmin session expired; nothing is wrong with the
@@ -157,7 +179,8 @@ its own, read by a model that knows nothing about kcal:
 Tests assert each of these parts is in the message.
 
 Opening `/login` directly needs no extra gate, because passing it requires
-logging in to Garmin as the owner.
+logging in to Garmin with an allowed email; it refreshes that user's
+session only.
 
 `_no_mfa()`'s "run `kcal fetch`" message stays for stdio; in HTTP mode the
 error points to `/login` instead.
@@ -170,12 +193,11 @@ All from environment variables (CLI flags may override), no hard-coded paths:
 |---|---|---|
 | `KCAL_PUBLIC_URL` | — (required with `--http`) | Public base URL, e.g. the quick-tunnel URL. Issuer and resource URL derive from it. |
 | `KCAL_PORT` | `8000` | Local port. |
-| `KCAL_GARMIN_OWNER` | — (required with `--http`) | Garmin profile ID allowed to log in. |
-| `KCAL_STATE_DIR` | `~/.kcal` | Holds `garmin_tokens/` (shared with the CLI on the PC) and `mcp_auth.sqlite`. |
+| `KCAL_ALLOWED_EMAILS` | — (required with `--http`) | Garmin login emails allowed to log in, comma-separated. |
+| `KCAL_STATE_DIR` | `~/.kcal` | Holds `users/` (each HTTP user's Garmin session), `garmin_tokens/` (the CLI's and stdio's) and `mcp_auth.sqlite`. |
 
-The server refuses to start in HTTP mode without the required settings. A
-small `kcal whoami` command prints the logged-in Garmin profile ID so the
-owner value is easy to find.
+The server refuses to start in HTTP mode without the required settings, or
+with the single-owner `KCAL_GARMIN_OWNER` still set.
 
 Quick tunnel: `cloudflared tunnel --url http://localhost:8000` prints a new
 `*.trycloudflare.com` URL on every start. Set `KCAL_PUBLIC_URL` to it, start
@@ -279,8 +301,10 @@ refused before any code runs.
 - Logs record tool name, arguments and outcome, never result payloads,
   passwords, MFA codes or tokens.
 - Garmin tokens and `mcp_auth.sqlite` on disk are what protect the data;
-  `KCAL_STATE_DIR` should only be readable by the owner.
-- One shared Garmin session; re-login replaces it under the existing lock.
+  `KCAL_STATE_DIR` should only be readable by the account running the
+  server. Whoever runs the server can read every user's data.
+- One Garmin session per profile, each in its own store and cache entry;
+  a user's re-login replaces only theirs, under that profile's lock.
 - Revoking all access: `kcal-mcp --revoke-all` signs every client out,
   even while the server runs (clients stay registered and just log in
   again). Deleting `mcp_auth.sqlite` and restarting also forgets the
@@ -293,8 +317,8 @@ refused before any code runs.
   0600 where the OS supports it (on Windows the user profile's ACLs apply).
 - The OAuth scope is `garmin:read`. Registration is open to any client, as
   the MCP spec expects; what protects the data is that tokens are only
-  issued after the owner logs in on `/login`. That page should therefore
-  show which client is asking and where it will send the owner back
+  issued after an allowed user logs in on `/login`. That page should therefore
+  show which client is asking and where it will send the user back
   (client name and redirect host), so a look-alike client can be spotted.
 
 ## 7. Moving to an always-on host later
@@ -324,7 +348,8 @@ Still depends on the choice of host:
 3. OAuth provider + SQLite store, with tests against the SDK's handlers.
    *(done; `/login` is a 503 placeholder)*
 4. `/login` page (both entry points): Garmin login, MFA step, owner check,
-   rate limit; tests with a faked `Garmin`. *(done)*
+   rate limit; tests with a faked `Garmin`. *(done; the owner check later
+   became an email allowlist with a Garmin session per user)*
 5. Connect claude.ai and ChatGPT through a quick tunnel; check the current
    requirements of each (ChatGPT developer mode, claude.ai custom connectors).
 6. Later: Google sign-in gate, hosting; optionally URL-mode elicitation.
