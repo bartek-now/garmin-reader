@@ -340,13 +340,9 @@ def test_call_endpoint_reports_login_failure(failing_login, remote):
 # --- the range endpoints get_garmin_summary uses ---------------------------------------
 
 
-def test_readiness_range_path_reachable_remotely(api):
-    # The one raw path left: readiness has no garminconnect range getter.
-    mcp_server._Garmin().connectapi("/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08")
-    assert api.calls == ["connectapi"]
-
-
-@pytest.mark.parametrize("getter", ["get_hrv_data_range", "get_sleep_daily"])
+@pytest.mark.parametrize(
+    "getter", ["get_hrv_data_range", "get_sleep_daily", "get_training_readiness_range"]
+)
 def test_range_getters_reachable_remotely(api, getter):
     getattr(mcp_server._Garmin(), getter)("2026-10-01", "2026-10-08")
     assert api.calls == [getter]
@@ -357,24 +353,17 @@ def test_range_getters_reachable_remotely(api, getter):
     [
         "/userprofile-service/socialProfile",
         "/activity-service/activity/1/details",
-        "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08/../../../userprofile-service/socialProfile",
-        "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08?x=1",
-        # Reached through their getters now, so no longer as raw paths.
+        # Reached through their getters, so never as raw paths.
         "/hrv-service/hrv/daily/2026-10-01/2026-10-08",
         "/sleep-service/stats/sleep/daily/2026-10-01/2026-10-08",
+        "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08",
+        "https://connectapi.garmin.com/userprofile-service/socialProfile",
     ],
 )
-def test_other_raw_paths_blocked_remotely(api, path):
+def test_raw_paths_blocked_remotely(api, path):
     with pytest.raises(ValueError, match="not available remotely"):
         mcp_server._Garmin().connectapi(path)
     assert api.calls == []
-
-
-def test_raw_path_extra_arguments_blocked_remotely(api):
-    with pytest.raises(ValueError, match="not available remotely"):
-        mcp_server._Garmin().connectapi(
-            "/metrics-service/metrics/trainingreadiness/2026-10-01/2026-10-08", method="POST"
-        )
 
 
 def test_summary_works_remotely_and_strips_nothing_it_needs(api, remote, monkeypatch):

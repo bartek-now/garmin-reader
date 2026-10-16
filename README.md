@@ -20,7 +20,7 @@ Each row of output covers one day:
 
 ## Setup
 
-Requires Python 3.12 or newer and garminconnect 0.3.17 or newer in the 0.3 series.
+Requires Python 3.12 or newer and garminconnect 0.3.19 or newer in the 0.3 series.
 
 ```
 python -m venv .venv

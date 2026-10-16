@@ -89,21 +89,19 @@ class FakeGarmin:
             },
         }] if start <= str(D3) <= end else []
 
-    def connectapi(self, path):
-        self._record("connectapi", path)
-        if path.startswith("/metrics-service/"):
-            return [
-                {"calendarDate": str(D3), "inputContext": "AFTER_POST_EXERCISE_RESET",
-                 "timestamp": "2026-10-09T15:00:00", "score": 40, "level": "LOW"},
-                {"calendarDate": str(D3), "inputContext": "AFTER_WAKEUP_RESET",
-                 "timestamp": "2026-10-09T07:30:00", "score": 61, "level": "MODERATE",
-                 "acuteLoad": 184, "recoveryTime": 1},
-                {"calendarDate": str(D2), "inputContext": "UPDATE_REALTIME_VARIABLES",
-                 "timestamp": "2026-10-08T12:00:00", "score": 55, "level": "MODERATE"},
-                {"calendarDate": str(D2), "inputContext": "AFTER_POST_EXERCISE_RESET",
-                 "timestamp": "2026-10-08T09:00:00", "score": 50, "level": "MODERATE"},
-            ]
-        raise AssertionError(path)
+    def get_training_readiness_range(self, start, end):
+        self._record("readiness_range", start, end)
+        return [
+            {"calendarDate": str(D3), "inputContext": "AFTER_POST_EXERCISE_RESET",
+             "timestamp": "2026-10-09T15:00:00", "score": 40, "level": "LOW"},
+            {"calendarDate": str(D3), "inputContext": "AFTER_WAKEUP_RESET",
+             "timestamp": "2026-10-09T07:30:00", "score": 61, "level": "MODERATE",
+             "acuteLoad": 184, "recoveryTime": 1},
+            {"calendarDate": str(D2), "inputContext": "UPDATE_REALTIME_VARIABLES",
+             "timestamp": "2026-10-08T12:00:00", "score": 55, "level": "MODERATE"},
+            {"calendarDate": str(D2), "inputContext": "AFTER_POST_EXERCISE_RESET",
+             "timestamp": "2026-10-08T09:00:00", "score": 50, "level": "MODERATE"},
+        ]
 
 
 @pytest.fixture
@@ -230,7 +228,7 @@ def test_only_needed_sources_are_fetched(api):
 
 def test_range_groups_cost_one_request(api):
     table(api, ["weight", "workouts", "hrv", "readiness"])
-    assert sorted(c[0] for c in api.calls) == ["activities", "connectapi", "hrv_range", "weigh_ins"]
+    assert sorted(c[0] for c in api.calls) == ["activities", "hrv_range", "readiness_range", "weigh_ins"]
 
 
 def test_sleep_asks_for_the_whole_range_at_once(api):
@@ -291,19 +289,6 @@ def test_per_day_groups_limit_the_range(api):
     summary.check_range(span(summary.MAX_PER_DAY_DAYS), ["activity", "hrv"])
     with pytest.raises(ValueError, match="with activity, lifestyle .* at most 120"):
         summary.check_range(span(summary.MAX_PER_DAY_DAYS + 1), ["hrv", "lifestyle", "activity"])
-
-
-def test_range_endpoint_paths():
-    # Only readiness is still a raw path; HRV and sleep have getters now.
-    ok = [f"/metrics-service/metrics/trainingreadiness/{D1}/{D3}"]
-    bad = ["/userprofile-service/socialProfile",
-           f"/metrics-service/metrics/trainingreadiness/{D1}/{D3}/../x",
-           f"/metrics-service/metrics/trainingreadiness/{D1}",
-           f"/metrics-service/metrics/trainingreadiness/{D1}/{D3}?x=1",
-           f"//metrics-service/metrics/trainingreadiness/{D1}/{D3}",
-           f"/hrv-service/hrv/daily/{D1}/{D3}", f"/sleep-service/stats/sleep/daily/{D1}/{D3}"]
-    assert all(summary.RANGE_PATHS.fullmatch(p) for p in ok)
-    assert not any(summary.RANGE_PATHS.fullmatch(p) for p in bad)
 
 
 # --- review fixes -----------------------------------------------------------------------
@@ -392,7 +377,7 @@ def test_a_failed_day_stops_the_rest(api):
 
 @pytest.mark.parametrize("method, groups", [
     ("get_hrv_data_range", ["hrv", "sleep"]),
-    ("connectapi", ["readiness", "heart"]),  # per-day groups come after readiness
+    ("get_training_readiness_range", ["readiness", "heart"]),  # per-day groups come after readiness
     ("get_user_summary", ["heart", "stress", "lifestyle"]),
     ("get_lifestyle_logging_data", ["lifestyle"]),
 ])

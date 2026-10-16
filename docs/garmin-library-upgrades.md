@@ -7,11 +7,51 @@ logout. Garmin's own token lock serializes refreshes and token-file writes;
 the adapter reuses it to protect its temporary HTTP hook and recorded error.
 
 The implementation and library tests were checked against **garminconnect
-0.3.17**. [pyproject.toml](../pyproject.toml) currently permits `>=0.3.17,<0.4`
+0.3.19**. [pyproject.toml](../pyproject.toml) currently permits `>=0.3.19,<0.4`
 and requires Python 3.12+. The upper bound limits upgrades; it does not
 guarantee that private internals remain compatible within the 0.3 series.
 Review these dependencies when changing the installed version, including
 when rebuilding a container that resolves a newer permitted release.
+
+## 0.3.19 audit (2026-10-16)
+
+[garminconnect 0.3.19](https://pypi.org/project/garminconnect/0.3.19/) was
+compared with 0.3.17 source-to-source and tested in a separate environment
+and then the project's. It still requires Python 3.12+ (the Python 3.13
+Docker image satisfies it) and `curl_cffi`, `requests` and `ua-generator`;
+it adds `tzdata` on Windows only. This is now the minimum supported release.
+
+The package was restructured: `garminconnect/client.py` became the
+`client/` package (the `Client` class is assembled from login, session,
+token-store and transport mixins) and `Garmin`'s getters moved into an
+`api/` package of mixins. Every private member kcal depends on still
+exists on the same objects, and replacing it on the instance still
+intercepts it:
+
+| Dependency | Finding in 0.3.19 | Decision |
+|---|---|---|
+| `_refresh_session`, `_token_lock` | Same logic, now in `client/session.py`; token writes after a refresh go through a new `_persist_tokens()`, which dumps to `_tokenstore_path` and suppresses errors exactly as before. The lock is still a `threading.RLock`. | No change. |
+| Refresh POST through `_http_post` | `_refresh_di_token()` now calls a new `_di_token_post()`, which still sends through `self._http_post` synchronously. Refresh failures are still swallowed and the old token retried, so kcal's interception is still needed. | No change; the real-client refresh tests pass. |
+| Credential login, MFA, `_mfa_session`, `_mfa_flow`, `_mfa_pending`, `_complete_mfa` | Unchanged logic, now in `client/sso.py`. `_mfa_session` and `_mfa_flow` now exist from construction rather than from the first login. Login logs a warning if `curl_cffi` is missing, which can't happen: it is a required dependency. | No change. |
+| Token persistence (`dump`, `load`) | Unchanged, now in `client/tokens.py`. | No change. |
+| API path checks in `_run_request` | Moved to a new `_resolve_url()`: the same traversal, query and fragment checks, and it now also accepts a full `https://` URL on a Garmin host. Errors now carry the HTTP response as `error.response`; their message is unchanged. | No change: remotely kcal sends no raw paths at all now (below). |
+| Getter error decorator | Still wraps connection errors with `raise ... from e`, but now retries only 5xx responses or errors with a network failure in their cause chain (before: anything without a status). | kcal's refresh-outage marker is still reached through the cause chain; outage and 404-isolation tests pass. |
+| Range getters | `get_hrv_data_range` and `get_sleep_daily` are unchanged. A new `get_training_readiness_range(start, end)` requests exactly the endpoint kcal used by raw path. | `get_garmin_summary` now uses it, so remote calls never send a raw path: the raw-path exception (`summary.RANGE_PATHS`) is gone and `training_readiness_range` is on `REMOTE_ALLOWED`. |
+
+No getters were removed; 144 were added (256 in all). The remote allowlist
+excludes all of them except `get_training_readiness_range`. Getters on the
+remote allowlist whose signatures changed, all with optional additions:
+`get_endurance_score` (`aggregation`, `"weekly"` by default, as before for
+ranges), `get_personal_record` (`include_history`, `months`),
+`get_nutrition_daily_food_log` (`include_goals`, `include_nutrition`,
+`meal_id`) and `get_workouts` (filtering and ordering options). Their
+single-day and missing-end behavior is unchanged.
+
+Validation:
+
+- 0.3.19: full offline suite, **1073 passed, 1 skipped**; `pip check` passed.
+- As before, no live account or production token store was used; live
+  login/MFA still needs the deployment check below.
 
 ## 0.3.17 audit (2026-10-11)
 
@@ -69,9 +109,9 @@ they should not be mistaken for a guarantee of compatibility.
 | `api.client.login` called by `Garmin.login()` | [`auth.login()`](../src/kcal/auth.py) temporarily replaces the client method while loading the cached session. | A failed cache refresh may cause `Garmin.login()` to attempt credential login. The guard must stop that fallback for temporary failures and retain the original refresh error, including when credentials are configured. The original client method must be restored on success and failure. |
 | Direct credential login and MFA continuation | [`GarminGateway.start()` and `finish()`](../src/kcal/login_page.py) call `api.client.login(..., return_on_mfa=True)` and `api.resume_login(None, code)`. | Credential login must actually validate the submitted credentials rather than load `GARMINTOKENS`. Check the returned status (`"needs_mfa"`), where MFA continuation state lives, and whether passing `None` remains valid. |
 | `api.client._mfa_session` and `_mfa_flow` | [`GarminGateway.finish()`](../src/kcal/login_page.py) temporarily wraps the MFA session to see whether any verification POST got an answer from Garmin, because `_complete_mfa` raises the same authentication error for a wrong code as for timeouts, 5xx and bot-check pages (and the widget flow lets transport errors escape raw). No answer raises `GarminVerificationUnavailable`. | Both flows must still send the code through `_mfa_session.post`, and restore nothing else on the session. Portal and mobile must still answer in JSON, the widget in HTML; `_mfa_flow` must still say which. Doubtful responses count as an answer (a counted wrong code), never as an outage. The real-client tests cover timeouts, 5xx (including JSON bodies), bot-check pages, 429s and wrong codes in both flows. |
-| `api.client._mfa_pending` | [`GarminGateway.mfa_pending()`](../src/kcal/login_page.py) reads it after a failed code to decide whether `/login` shows the code form again or makes the user start over. | A wrong or rate-limited code must leave it `True` (0.3.17 keeps the step open) and success must clear it; the real-client tests check both. If it disappears, `mfa_pending()` says no and the user starts over: safe, but the retry is lost. |
+| `api.client._mfa_pending` | [`GarminGateway.mfa_pending()`](../src/kcal/login_page.py) reads it after a failed code to decide whether `/login` shows the code form again or makes the user start over. | A wrong or rate-limited code must leave it `True` (0.3.17 and later keep the step open) and success must clear it; the real-client tests check both. If it disappears, `mfa_pending()` says no and the user starts over: safe, but the retry is lost. |
 | Token persistence | [`GarminGateway.save()`](../src/kcal/login_page.py) calls `api.client.dump(path)`; [`auth.login()`](../src/kcal/auth.py) reloads that store through `Garmin.login(path)`. | Saved tokens must reload without credentials and remain renewable. Inspect changes to the file format, save timing, and file permissions. |
-| Range getters `get_hrv_data_range(start, end)` and `get_sleep_daily(start, end)` | [`summary._hrv()` and `_sleep()`](../src/kcal/summary.py); both are on `REMOTE_ALLOWED`. | `get_hrv_data_range` must still return `{"hrvSummaries": [...]}` from one request. `get_sleep_daily` must still split ranges into Garmin's 28-day chunks and return the merged, de-duplicated `individualStats` rows. `tests/test_garmin_library.py` checks both with the real client. Training readiness has no range getter; kcal still requests it by raw path (`summary.RANGE_PATHS`), so check whether a getter has appeared. Because range getters can make many requests (one per chunk or page), `call_garmin_endpoint` refuses date ranges over 366 days before calling any getter with a `start`/`end`, `startdate`/`enddate` or `fromdate`/`todate` pair; check new getters use one of those names. A missing end counts as today unless the getter is in `endpoints.MISSING_END_IS_START` (those set end = start); the real-client tests check that list, and a new getter with an optional end needs a decision. |
+| Range getters `get_hrv_data_range(start, end)`, `get_sleep_daily(start, end)` and `get_training_readiness_range(start, end)` | [`summary._hrv()`, `_sleep()` and `_readiness()`](../src/kcal/summary.py); all three are on `REMOTE_ALLOWED`. | `get_hrv_data_range` must still return `{"hrvSummaries": [...]}` from one request. `get_sleep_daily` must still split ranges into Garmin's 28-day chunks and return the merged, de-duplicated `individualStats` rows. `tests/test_garmin_library.py` checks both with the real client. `get_training_readiness_range` must still return the list of readiness entries (several per day possible) from one request. Because range getters can make many requests (one per chunk or page), `call_garmin_endpoint` refuses date ranges over 366 days before calling any getter with a `start`/`end`, `startdate`/`enddate` or `fromdate`/`todate` pair; check new getters use one of those names. A missing end counts as today unless the getter is in `endpoints.MISSING_END_IS_START` (those set end = start); the real-client tests check that list, and a new getter with an optional end needs a decision. |
 | Exception translation and chaining | [`auth.is_refresh_unavailable()`](../src/kcal/auth.py), [`endpoints.py`](../src/kcal/endpoints.py), [`summary.py`](../src/kcal/summary.py), and [`mcp_server.py`](../src/kcal/mcp_server.py). | Library decorators may wrap connection errors. The adapter's `GarminRefreshUnavailable` marker must remain reachable through `__cause__` or `__context__`. A refresh outage must fail the whole tool call with retry guidance; an unsupported optional endpoint's 404 must still allow other metrics to return. |
 
 `kcal_refresh_error` and `kcal_refresh_guarded` are attributes added by kcal, not
