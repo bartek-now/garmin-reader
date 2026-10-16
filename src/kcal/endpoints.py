@@ -85,7 +85,7 @@ REMOTE_ALLOWED = frozenset({
     # Workouts (planned templates and the schedule)
     "workouts", "workout_by_id", "scheduled_workouts",
     # Ranges (used by get_garmin_summary)
-    "hrv_data_range", "sleep_daily",
+    "hrv_data_range", "sleep_daily", "training_readiness_range",
     # Nutrition
     "nutrition_daily_food_log", "nutrition_daily_meals",
     "nutrition_daily_settings", "lifestyle_logging_data",

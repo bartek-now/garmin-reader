@@ -9,7 +9,6 @@ except `lifestyle`, which has its own.
 from __future__ import annotations
 
 import contextvars
-import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
@@ -35,13 +34,6 @@ MAX_PER_DAY_DAYS = 120
 MAX_RANGE_DAYS = 366
 # Per-day requests run this many at a time.
 PER_DAY_WORKERS = 4
-
-# Training readiness for a range has no garminconnect getter, so it's reached
-# with connectapi(path). Over HTTP only paths matching this are allowed. (HRV
-# and sleep use garminconnect's range getters, which are on the allowlist.)
-RANGE_PATHS = re.compile(
-    r"/metrics-service/metrics/trainingreadiness/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}"
-)
 
 # Each group's columns, in output order.
 GROUP_FIELDS: dict[str, tuple[str, ...]] = {
@@ -374,7 +366,7 @@ def _sleep(api: Any, start: date, end: date) -> dict[str, dict]:
 
 
 def _readiness(api: Any, start: date, end: date) -> dict[str, dict]:
-    entries = api.connectapi(f"/metrics-service/metrics/trainingreadiness/{start}/{end}") or []
+    entries = api.get_training_readiness_range(start.isoformat(), end.isoformat()) or []
     chosen: dict[str, tuple[tuple, dict]] = {}
     for e in entries:
         day = e.get("calendarDate")

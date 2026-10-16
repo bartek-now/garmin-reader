@@ -282,23 +282,11 @@ class _Garmin:
 
     def __getattr__(self, name):
         allowed = _exposure.get().allowed
-        if allowed is not None and name == "connectapi":
-            return _range_endpoint_only
         if allowed is not None and not (
             name.startswith("get_") and name.removeprefix("get_") in allowed
         ):
             raise ValueError(f"Garmin {name!r} is not available remotely.")
         return getattr(_get_api(), name)
-
-
-def _range_endpoint_only(path: str, **kwargs):
-    """Remotely, raw requests are allowed only for the training-readiness
-    range get_garmin_summary uses (it has no garminconnect getter), matched
-    in full.
-    """
-    if not summary.RANGE_PATHS.fullmatch(path) or kwargs:
-        raise ValueError(f"Garmin path {path!r} is not available remotely.")
-    return _get_api().connectapi(path)
 
 
 def _no_mfa() -> str:

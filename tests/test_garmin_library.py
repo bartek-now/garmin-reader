@@ -554,6 +554,11 @@ class FakeRangeApi:
             return response(200, body, url)
         if path.startswith("/hrv-service/hrv/daily/"):
             return response(200, {"hrvSummaries": [{"calendarDate": "2026-09-29", "lastNightAvg": 41}]}, url)
+        if path.startswith("/metrics-service/metrics/trainingreadiness/"):
+            return response(200, [
+                {"calendarDate": "2026-09-29", "inputContext": "AFTER_WAKEUP_RESET",
+                 "timestamp": "2026-09-29T07:30:00", "score": 61, "level": "MODERATE"},
+            ], url)
         return response(404, {}, url)
 
 
@@ -580,12 +585,20 @@ def test_hrv_data_range_is_one_request_returning_summaries(garmin):
     assert out["hrvSummaries"][0]["lastNightAvg"] == 41
 
 
+def test_training_readiness_range_is_one_request_returning_entries(garmin):
+    session = FakeRangeApi()
+    stub(garmin.client, "_api_session", session)
+    out = garmin.get_training_readiness_range("2025-10-01", "2026-09-30")
+    assert session.paths == ["/metrics-service/metrics/trainingreadiness/2025-10-01/2026-09-30"]
+    assert out[0]["score"] == 61
+
+
 def test_summary_reads_the_real_getters_output(garmin):
     from kcal import summary
 
     stub(garmin.client, "_api_session", FakeRangeApi())
     days = [date(2026, 8, 1) + timedelta(days=i) for i in range(60)]
-    out = summary.summarize(garmin, days, ["sleep", "hrv"])
+    out = summary.summarize(garmin, days, ["sleep", "hrv", "readiness"])
     fields, rows = out["fields"], {r[0]: dict(zip(out["fields"], r)) for r in out["days"]}
     assert "errors" not in out
     # Every night, including both sides of each 28-day chunk boundary.
@@ -593,7 +606,8 @@ def test_summary_reads_the_real_getters_output(garmin):
         d.isoformat(): sleep_score(d) for d in days
     }
     assert rows["2026-09-29"]["hrv_last_night_ms"] == 41
-    assert {"sleep_score", "hrv_last_night_ms"} <= set(fields)
+    assert rows["2026-09-29"]["readiness_score"] == 61
+    assert {"sleep_score", "hrv_last_night_ms", "readiness_score"} <= set(fields)
 
 
 # --- the verification step the login page lets the owner retry --------------------
