@@ -1,6 +1,6 @@
 [project]
 name = "kcal"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Fetch daily steps and workout calories from Garmin Connect, with workout steps deduplicated from the daily total."
 requires-python = ">=3.12"
 dependencies = [
@@ -20,3 +20,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "kcal.__version__"}

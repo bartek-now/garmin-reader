@@ -104,8 +104,9 @@ the private hooks and library behavior kcal depends on, and the checks to run.
   366 days (checked before Garmin is asked, since some range endpoints make
   a request per few weeks), and results over ~50k chars are replaced by a
   notice asking for a narrower request.
-- `get_kcal_server_info`: which code the running server loaded and whether
-  it's stale (code on disk changed since it started).
+- `get_kcal_server_info`: the running server's kcal version, git commit and
+  garminconnect version, and whether it's stale (code on disk changed since
+  it started).
 
 `kcal fetch` output is unchanged. Login is non-interactive, so run
 `kcal fetch` once in a terminal first to cache the session token.

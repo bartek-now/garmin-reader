@@ -47,8 +47,37 @@ def test_call_garmin_endpoint_through_mcp():
 
 
 def test_server_info_through_mcp():
+    import importlib.metadata
+
+    import kcal
+
     out = call("get_kcal_server_info", {})
     assert out["stale"] is False
+    assert out["version"] == kcal.__version__
+    assert out["garminconnect"] == importlib.metadata.version("garminconnect")
+
+
+def test_code_hash_ignores_line_endings(tmp_path, monkeypatch):
+    # A Windows checkout (CRLF) and the Linux one in the image, same commit.
+    for name, text in {"a.py": "x = 1\ny = 2\n", "b.py": "z = 3\n"}.items():
+        (tmp_path / name).write_bytes(text.encode())
+    monkeypatch.setattr(mcp_server, "_SRC", tmp_path)
+    lf = mcp_server._code_hash()
+    (tmp_path / "a.py").write_bytes(b"x = 1\r\ny = 2\r\n")
+    assert mcp_server._code_hash() == lf
+    (tmp_path / "a.py").write_bytes(b"x = 1\r\ny = 3\r\n")
+    assert mcp_server._code_hash() != lf  # but real changes still show
+
+
+def test_commit_comes_from_the_image_without_git(monkeypatch):
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(mcp_server.subprocess, "run", no_git)
+    monkeypatch.setenv("KCAL_GIT_COMMIT", "a6d83ce")
+    assert mcp_server._git_commit() == "a6d83ce"
+    monkeypatch.delenv("KCAL_GIT_COMMIT")
+    assert mcp_server._git_commit() is None
 
 
 def test_summary_errors_reach_caller():
