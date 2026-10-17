@@ -30,5 +30,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
     CMD python -c "import os, urllib.request as u; p = os.environ.get('KCAL_PORT') or os.environ.get('PORT') or '8000'; u.urlopen('http://127.0.0.1:' + p + '/healthz', timeout=4)"
 
+# The commit the image was built from (the image has no git history), for
+# get_kcal_server_info. Last, so changing it doesn't rebuild the layers above.
+ARG KCAL_GIT_COMMIT=
+ENV KCAL_GIT_COMMIT=$KCAL_GIT_COMMIT
+
 # KCAL_PUBLIC_URL and KCAL_ALLOWED_EMAILS are required at run time.
 CMD ["kcal-mcp", "--http"]

@@ -1,12 +1,16 @@
 # kcal on one VM: the server, with Caddy in front of it for HTTPS
 # (certificates from Let's Encrypt, renewed automatically).
-# Settings come from .env next to this file (written by setup-vm.sh).
+# Settings come from .env next to this file (written by setup-vm.sh),
+# including the commit being deployed, which the image records.
 # See docs/deployment.md, "Google Cloud VM".
 name: kcal
 
 services:
   kcal:
-    build: ../..
+    build:
+      context: ../..
+      args:
+        KCAL_GIT_COMMIT: ${KCAL_GIT_COMMIT:-}
     restart: unless-stopped
     environment:
       KCAL_PUBLIC_URL: https://${KCAL_DOMAIN:?set KCAL_DOMAIN in .env}

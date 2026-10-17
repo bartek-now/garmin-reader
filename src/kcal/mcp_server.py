@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import functools
 import hashlib
+import importlib.metadata
 import inspect
 import os
 import shutil
@@ -38,7 +39,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
-from kcal import endpoints, summary
+from kcal import __version__, endpoints, summary
 from kcal.auth import GarminLoginError, garmin_profile_id, is_refresh_unavailable, login
 from kcal.daily import resolve_days
 from kcal.http_log import LogClientErrors
@@ -84,21 +85,35 @@ _SRC = Path(__file__).resolve().parent
 
 
 def _code_hash() -> str:
-    """Short hash of the package's .py files as they are on disk right now."""
+    """Short hash of the package's .py files as they are on disk right now.
+    Line endings are normalized, so a Windows checkout (CRLF) and a Linux
+    one (LF) of the same commit hash the same.
+    """
     h = hashlib.sha256()
     for f in sorted(_SRC.glob("*.py")):
         h.update(f.name.encode())
-        h.update(f.read_bytes())
+        h.update(f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:12]
 
 
 def _git_commit() -> str | None:
+    """The commit of the git checkout the code runs from (with -dirty for
+    uncommitted changes), else KCAL_GIT_COMMIT, which the Docker image
+    records at build time since it has no git history.
+    """
     try:
         return subprocess.run(
             ["git", "describe", "--always", "--dirty"],
             cwd=_SRC, capture_output=True, text=True, timeout=5, check=True,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
+        return os.environ.get("KCAL_GIT_COMMIT") or None
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
         return None
 
 
@@ -428,11 +443,16 @@ def get_garmin_day(date: str, metrics: list[str] | None = None) -> dict:
 def get_kcal_server_info() -> dict:
     """Which kcal code this server is running, and whether it is out of date.
 
-    `stale: true` means the code on disk changed after this server started;
-    fully quit and reopen the client to load it.
+    `version` is kcal's release, `loaded_git` the commit it was built from
+    and `garminconnect` the Garmin library's version. `loaded_code` hashes
+    the source (the same for the same code on any OS). `stale: true` means
+    the code on disk changed after this server started; fully quit and
+    reopen the client to load it.
     """
     on_disk = _code_hash()
     return {
+        "version": __version__,
+        "garminconnect": _package_version("garminconnect"),
         "loaded_code": _LOADED_HASH,
         "loaded_git": _LOADED_COMMIT,
         "on_disk_code": on_disk,

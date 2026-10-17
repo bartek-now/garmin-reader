@@ -46,7 +46,9 @@ echo "kcal at $(sudo git -C "$DIR" log -1 --format='%h %s')"
 
 # Settings, readable by root only.
 sudo install -m 600 /dev/null "$DIR/deploy/gcp/.env"
-printf 'KCAL_DOMAIN=%s\nKCAL_ALLOWED_EMAILS=%s\n' "$DOMAIN" "$EMAILS" | sudo tee "$DIR/deploy/gcp/.env" >/dev/null
+COMMIT=$(sudo git -C "$DIR" rev-parse --short HEAD)
+printf 'KCAL_DOMAIN=%s\nKCAL_ALLOWED_EMAILS=%s\nKCAL_GIT_COMMIT=%s\n' "$DOMAIN" "$EMAILS" "$COMMIT" \
+    | sudo tee "$DIR/deploy/gcp/.env" >/dev/null
 
 cd "$DIR/deploy/gcp"
 # Recreate both containers every time: Compose doesn't reliably notice a
