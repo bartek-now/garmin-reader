@@ -39,10 +39,6 @@ calls `/healthz`, which needs no sign-in and reports only that the server is
 up. It doesn't check Garmin, so a Garmin outage doesn't get the server
 restarted.
 
-A container set up before the rename (from kcal) keeps working: the old
-`KCAL_` settings are still read, and its volume (`kcal-data`) holds
-everything, so mount that one into the new image.
-
 ## Settings
 
 | Variable | Default | Meaning |

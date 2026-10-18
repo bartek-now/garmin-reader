@@ -164,14 +164,6 @@ the user's Garmin profile before tools can read any health data.
 | `GARMIN_READER_HOST` | `--host` | `127.0.0.1` (`0.0.0.0` in a container) |
 | `GARMIN_READER_STATE_DIR` | | `~/.garmin-reader` (`users/<profile>/` with each user's Garmin tokens; `mcp_auth.sqlite` with OAuth clients, hashed tokens and users) |
 
-## Renamed from kcal
-
-Before 1.0.0 this project was called kcal. What it set up still works:
-
-- Each setting above is also read under its old name (`KCAL_PUBLIC_URL`
-  and so on) when the new one isn't set.
-- `~/.kcal` is still used while `~/.garmin-reader` doesn't exist. To
-  switch, stop the server and rename the folder.
-- The commands are now `garmin-reader` and `garmin-reader-mcp`: point MCP
-  client configs at `garmin-reader-mcp.exe`, then `pip uninstall kcal`.
-- The tool `get_kcal_server_info` is now `get_garmin_reader_info`.
+Before 1.0.0 this project was called kcal: its settings were `KCAL_*`, its
+folder `~/.kcal` and its commands `kcal` and `kcal-mcp`. Rename them to
+switch.

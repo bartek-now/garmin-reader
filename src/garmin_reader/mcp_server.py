@@ -49,7 +49,6 @@ from garmin_reader.settings import (
     HttpSettings,
     normalize_email,
     parse_allowed_emails,
-    setting,
     state_dir,
     user_token_store,
     users_dir,
@@ -108,7 +107,7 @@ def _git_commit() -> str | None:
             cwd=_SRC, capture_output=True, text=True, timeout=5, check=True,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return setting("GIT_COMMIT") or None
+        return os.environ.get("GARMIN_READER_GIT_COMMIT") or None
 
 
 def _package_version(name: str) -> str | None:
@@ -634,7 +633,7 @@ def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) 
     """
     try:
         allowed = parse_allowed_emails(
-            allowed_emails if allowed_emails is not None else setting("ALLOWED_EMAILS")
+            allowed_emails if allowed_emails is not None else os.environ.get("GARMIN_READER_ALLOWED_EMAILS")
         )
     except ValueError as e:
         print(f"garmin-reader-mcp: {e}", file=sys.stderr)

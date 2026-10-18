@@ -5,7 +5,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from garmin_reader import mcp_server
-from garmin_reader.settings import HttpSettings, garmin_token_store, setting, state_dir
+from garmin_reader.settings import HttpSettings, garmin_token_store, state_dir
 
 PUBLIC = "https://abc-def.trycloudflare.com"
 HEADERS = {
@@ -126,33 +126,6 @@ def test_state_dir(tmp_path, monkeypatch):
     assert state_dir({}) == tmp_path / ".garmin-reader"
     store = tmp_path / "elsewhere"
     assert garmin_token_store({"GARMIN_READER_STATE_DIR": str(store)}) == store / "garmin_tokens"
-
-
-def test_state_dir_from_before_the_rename_is_still_used(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    (tmp_path / ".kcal").mkdir()
-    assert state_dir({}) == tmp_path / ".kcal"
-    assert state_dir({"KCAL_STATE_DIR": str(tmp_path / "old")}) == tmp_path / "old"
-    # Once the new folder exists, it wins, as does the new setting.
-    (tmp_path / ".garmin-reader").mkdir()
-    assert state_dir({}) == tmp_path / ".garmin-reader"
-    env = {"GARMIN_READER_STATE_DIR": str(tmp_path / "new"), "KCAL_STATE_DIR": str(tmp_path / "old")}
-    assert state_dir(env) == tmp_path / "new"
-
-
-def test_settings_from_before_the_rename_are_still_read():
-    assert setting("PORT", {"KCAL_PORT": "9000"}) == "9000"
-    assert setting("PORT", {"KCAL_PORT": "9000", "GARMIN_READER_PORT": "9001"}) == "9001"
-    assert setting("PORT", {}) is None
-    s = HttpSettings.from_env({
-        "KCAL_PUBLIC_URL": PUBLIC,
-        "KCAL_PORT": "9000",
-        "KCAL_HOST": "0.0.0.0",
-        "KCAL_ALLOWED_EMAILS": "me@example.com",
-    })
-    assert (s.public_url, s.port, s.host, s.allowed_emails) == (
-        PUBLIC, 9000, "0.0.0.0", frozenset({"me@example.com"})
-    )
 
 
 # --- HTTP transport ---------------------------------------------------------

@@ -15,22 +15,10 @@ DEFAULT_HOST = "127.0.0.1"
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
-def setting(name: str, env: Mapping[str, str] = os.environ) -> str | None:
-    """GARMIN_READER_<name>, else KCAL_<name>, as it was called before the
-    project was renamed from kcal.
-    """
-    return env.get(f"GARMIN_READER_{name}") or env.get(f"KCAL_{name}")
-
-
 def state_dir(env: Mapping[str, str] = os.environ) -> Path:
-    """Where garmin-reader keeps Garmin tokens (and, in HTTP mode, auth
-    state): GARMIN_READER_STATE_DIR, else ~/.garmin-reader, or ~/.kcal if
-    only that exists (from before the rename).
-    """
-    if value := setting("STATE_DIR", env):
-        return Path(value).expanduser()
-    new, old = Path.home() / ".garmin-reader", Path.home() / ".kcal"
-    return old if old.is_dir() and not new.exists() else new
+    """Where garmin-reader keeps Garmin tokens (and, in HTTP mode, auth state)."""
+    value = env.get("GARMIN_READER_STATE_DIR")
+    return Path(value).expanduser() if value else Path.home() / ".garmin-reader"
 
 
 def garmin_token_store(env: Mapping[str, str] = os.environ) -> Path:
@@ -83,15 +71,15 @@ class HttpSettings:
         """Explicit arguments (from CLI flags) win over
         GARMIN_READER_PUBLIC_URL, GARMIN_READER_PORT (or PORT, which hosting
         platforms such as Cloud Run set), GARMIN_READER_HOST and
-        GARMIN_READER_ALLOWED_EMAILS, each with its old KCAL_ name as a
-        fallback. Raises ValueError naming the setting that's wrong.
+        GARMIN_READER_ALLOWED_EMAILS. Raises ValueError naming the setting
+        that's wrong.
         """
         if env.get("KCAL_GARMIN_OWNER"):
             raise ValueError(
                 "KCAL_GARMIN_OWNER is no longer used: list the Garmin emails allowed "
                 "to sign in in GARMIN_READER_ALLOWED_EMAILS instead"
             )
-        url = public_url or setting("PUBLIC_URL", env)
+        url = public_url or env.get("GARMIN_READER_PUBLIC_URL")
         if not url:
             raise ValueError(
                 "HTTP mode needs the server's public URL: set GARMIN_READER_PUBLIC_URL "
@@ -100,11 +88,11 @@ class HttpSettings:
         return cls(
             public_url=_check_url(url),
             port=_check_port(
-                port if port is not None else setting("PORT", env) or env.get("PORT")
+                port if port is not None else env.get("GARMIN_READER_PORT") or env.get("PORT")
             ),
-            host=_check_host(host or setting("HOST", env) or DEFAULT_HOST),
+            host=_check_host(host or env.get("GARMIN_READER_HOST") or DEFAULT_HOST),
             allowed_emails=parse_allowed_emails(
-                allowed_emails if allowed_emails is not None else setting("ALLOWED_EMAILS", env)
+                allowed_emails if allowed_emails is not None else env.get("GARMIN_READER_ALLOWED_EMAILS")
             ),
         )
 
