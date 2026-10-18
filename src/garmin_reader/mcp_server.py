@@ -2,8 +2,8 @@
 
 Runs over stdio by default, or over Streamable HTTP with `--http` (see
 docs/http-server-design.md). Over stdio, login is non-interactive: run
-`kcal fetch` once in a terminal first so the session token (and any MFA
-code) is cached under KCAL_STATE_DIR (default ~/.kcal). Over HTTP, each
+`garmin-reader fetch` once in a terminal first so the session token (and any MFA
+code) is cached under GARMIN_READER_STATE_DIR (default ~/.garmin-reader). Over HTTP, each
 allowed user signs in to Garmin on the /login page and gets their own
 session.
 """
@@ -39,13 +39,13 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
-from kcal import __version__, endpoints, summary
-from kcal.auth import GarminLoginError, garmin_profile_id, is_refresh_unavailable, login
-from kcal.daily import resolve_days
-from kcal.http_log import LogClientErrors
-from kcal.login_page import GarminGateway, LoginPage
-from kcal.oauth import KcalOAuthProvider, auth_settings
-from kcal.settings import (
+from garmin_reader import __version__, endpoints, summary
+from garmin_reader.auth import GarminLoginError, garmin_profile_id, is_refresh_unavailable, login
+from garmin_reader.daily import resolve_days
+from garmin_reader.http_log import LogClientErrors
+from garmin_reader.login_page import GarminGateway, LoginPage
+from garmin_reader.oauth import GarminReaderOAuthProvider, auth_settings
+from garmin_reader.settings import (
     HttpSettings,
     normalize_email,
     parse_allowed_emails,
@@ -77,9 +77,9 @@ LOCAL = _Exposure(allowed=None, scrub=lambda result: result)
 REMOTE = _Exposure(allowed=endpoints.REMOTE_ALLOWED, scrub=endpoints.strip_private)
 # Fails closed: code running outside a tool wrapper gets the remote rules.
 # stdio tools unlock LOCAL explicitly in _wrap().
-_exposure: ContextVar[_Exposure] = ContextVar("kcal_exposure", default=REMOTE)
+_exposure: ContextVar[_Exposure] = ContextVar("garmin_reader_exposure", default=REMOTE)
 # The signed-in user (lowercase email) a tool call runs for, from its token.
-_user: ContextVar[str | None] = ContextVar("kcal_user", default=None)
+_user: ContextVar[str | None] = ContextVar("garmin_reader_user", default=None)
 
 _SRC = Path(__file__).resolve().parent
 
@@ -98,7 +98,7 @@ def _code_hash() -> str:
 
 def _git_commit() -> str | None:
     """The commit of the git checkout the code runs from (with -dirty for
-    uncommitted changes), else KCAL_GIT_COMMIT, which the Docker image
+    uncommitted changes), else GARMIN_READER_GIT_COMMIT, which the Docker image
     records at build time since it has no git history.
     """
     try:
@@ -107,7 +107,7 @@ def _git_commit() -> str | None:
             cwd=_SRC, capture_output=True, text=True, timeout=5, check=True,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return os.environ.get("KCAL_GIT_COMMIT") or None
+        return os.environ.get("GARMIN_READER_GIT_COMMIT") or None
 
 
 def _package_version(name: str) -> str | None:
@@ -169,7 +169,7 @@ def _user_api(exposure: _Exposure):
     user = _user.get()
     if user is None:
         # Fails closed: a call with no user never falls back to a session.
-        raise GarminLoginError("This request isn't signed in to kcal.")
+        raise GarminLoginError("This request isn't signed in to garmin-reader.")
     while True:
         link = exposure.garmin_session(user)
         if link is None:
@@ -268,7 +268,7 @@ def _login_error(err: Exception) -> GarminLoginError:
 
 
 GARMIN_BUSY_MESSAGE = (
-    "Garmin is unreachable or limiting requests right now, so kcal can't read "
+    "Garmin is unreachable or limiting requests right now, so garmin-reader can't read "
     "Garmin data. This usually passes on its own: try again in a few minutes. "
     "There's no need to sign in again or reconnect the connector."
 )
@@ -276,10 +276,10 @@ GARMIN_BUSY_MESSAGE = (
 
 def garmin_expired_message(login_url: str) -> str:
     """The only cue the user gets, read by a model that knows nothing about
-    kcal, so it says everything (design section 3).
+    garmin-reader, so it says everything (design section 3).
     """
     return (
-        "Garmin session expired, so kcal can't read Garmin data right now. "
+        "Garmin session expired, so garmin-reader can't read Garmin data right now. "
         "Nothing is wrong with the connector. "
         f"To fix it, open {login_url} and sign in to Garmin (enter the "
         "verification code if Garmin asks for one). "
@@ -306,7 +306,7 @@ class _Garmin:
 
 def _no_mfa() -> str:
     raise RuntimeError(
-        "Garmin login needs an MFA code or fresh credentials. Run `kcal fetch` "
+        "Garmin login needs an MFA code or fresh credentials. Run `garmin-reader fetch` "
         "in a terminal once to refresh the cached session, then retry."
     )
 
@@ -440,10 +440,10 @@ def get_garmin_day(date: str, metrics: list[str] | None = None) -> dict:
 
 
 @_tool
-def get_kcal_server_info() -> dict:
-    """Which kcal code this server is running, and whether it is out of date.
+def get_garmin_reader_info() -> dict:
+    """Which garmin-reader code this server is running, and whether it is out of date.
 
-    `version` is kcal's release, `loaded_git` the commit it was built from
+    `version` is garmin-reader's release, `loaded_git` the commit it was built from
     and `garminconnect` the Garmin library's version. `loaded_code` hashes
     the source (the same for the same code on any OS). `stale: true` means
     the code on disk changed after this server started; fully quit and
@@ -463,7 +463,7 @@ def get_kcal_server_info() -> dict:
 
 
 def build_server(
-    http: HttpSettings | None = None, oauth: KcalOAuthProvider | None = None
+    http: HttpSettings | None = None, oauth: GarminReaderOAuthProvider | None = None
 ) -> FastMCP:
     """A FastMCP server with every tool. With `http`, it's set up to be
     served over Streamable HTTP on 127.0.0.1, reached through `http.public_url`,
@@ -500,7 +500,7 @@ def build_server(
         oauth.configure_allowed(http.allowed_emails)
         _remove_unused_sessions(oauth.garmin_profiles())
         kwargs.update(auth_server_provider=oauth, auth=auth_settings(http.public_url))
-    server = FastMCP("kcal", **kwargs)
+    server = FastMCP("garmin-reader", **kwargs)
     if http is not None:
         server.custom_route("/healthz", methods=["GET"])(_healthz)
     exposure = LOCAL if http is None else REMOTE
@@ -553,7 +553,7 @@ mcp = build_server()
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="kcal-mcp",
+        prog="garmin-reader-mcp",
         description="Garmin MCP server. Runs over stdio unless --http is given.",
     )
     parser.add_argument(
@@ -563,26 +563,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--public-url", metavar="URL",
         help="Public base URL clients use, e.g. https://abc.trycloudflare.com "
-        "(default: $KCAL_PUBLIC_URL)",
+        "(default: $GARMIN_READER_PUBLIC_URL)",
     )
     parser.add_argument(
         "--port", metavar="N",
-        help="Port to listen on (default: $KCAL_PORT, else $PORT, else 8000)",
+        help="Port to listen on (default: $GARMIN_READER_PORT, else $PORT, else 8000)",
     )
     parser.add_argument(
         "--host", metavar="IP",
-        help="Address to listen on (default: $KCAL_HOST or 127.0.0.1; "
+        help="Address to listen on (default: $GARMIN_READER_HOST or 127.0.0.1; "
         "0.0.0.0 in a container)",
     )
     parser.add_argument(
         "--allowed-emails", metavar="EMAILS",
         help="Garmin login emails allowed to sign in, comma-separated "
-        "(default: $KCAL_ALLOWED_EMAILS)",
+        "(default: $GARMIN_READER_ALLOWED_EMAILS)",
     )
     parser.add_argument(
         "--import-garmin-session", nargs=2, metavar=("EMAIL", "FOLDER"),
         help="Store the Garmin session in FOLDER (garmin_tokens.json, e.g. from "
-        "`kcal fetch`) as EMAIL's, for when Garmin refuses sign-ins from the "
+        "`garmin-reader fetch`) as EMAIL's, for when Garmin refuses sign-ins from the "
         "server's address; then exit. EMAIL must be allowed",
     )
     parser.add_argument(
@@ -610,14 +610,14 @@ def main(argv: list[str] | None = None) -> int:
         if not http.allowed_emails:
             raise ValueError(
                 "HTTP mode needs the Garmin emails allowed to sign in: set "
-                "KCAL_ALLOWED_EMAILS or pass --allowed-emails"
+                "GARMIN_READER_ALLOWED_EMAILS or pass --allowed-emails"
             )
     except ValueError as e:
-        print(f"kcal-mcp: {e}", file=sys.stderr)
+        print(f"garmin-reader-mcp: {e}", file=sys.stderr)
         return 2
-    oauth = KcalOAuthProvider(state_dir() / "mcp_auth.sqlite", http.public_url)
+    oauth = GarminReaderOAuthProvider(state_dir() / "mcp_auth.sqlite", http.public_url)
     print(
-        f"kcal-mcp: serving {http.public_url}/mcp from {http.host}:{http.port}; "
+        f"garmin-reader-mcp: serving {http.public_url}/mcp from {http.host}:{http.port}; "
         f"{len(http.allowed_emails)} user(s) may sign in at {http.public_url}/login",
         file=sys.stderr,
     )
@@ -633,14 +633,14 @@ def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) 
     """
     try:
         allowed = parse_allowed_emails(
-            allowed_emails if allowed_emails is not None else os.environ.get("KCAL_ALLOWED_EMAILS")
+            allowed_emails if allowed_emails is not None else os.environ.get("GARMIN_READER_ALLOWED_EMAILS")
         )
     except ValueError as e:
-        print(f"kcal-mcp: {e}", file=sys.stderr)
+        print(f"garmin-reader-mcp: {e}", file=sys.stderr)
         return 2
     user = normalize_email(email)
     if user not in allowed:
-        print(f"kcal-mcp: {user} isn't in KCAL_ALLOWED_EMAILS.", file=sys.stderr)
+        print(f"garmin-reader-mcp: {user} isn't in GARMIN_READER_ALLOWED_EMAILS.", file=sys.stderr)
         return 2
     try:
         api = login(token_store=Path(folder), prompt_mfa=_no_mfa, env_credentials=False)
@@ -649,9 +649,9 @@ def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) 
         # can't be renewed.
         GarminGateway().save(api, user_token_store(profile))
     except Exception as err:
-        print(f"kcal-mcp: couldn't use the Garmin session in {folder}: {err}", file=sys.stderr)
+        print(f"garmin-reader-mcp: couldn't use the Garmin session in {folder}: {err}", file=sys.stderr)
         return 1
-    provider = KcalOAuthProvider(state_dir() / "mcp_auth.sqlite", public_url="")
+    provider = GarminReaderOAuthProvider(state_dir() / "mcp_auth.sqlite", public_url="")
     try:
         # The same allowlist as the server's, so this changes nothing else.
         provider.configure_allowed(allowed)
@@ -660,7 +660,7 @@ def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) 
     finally:
         provider.close()
     print(
-        f"kcal-mcp: stored the Garmin session as {user}'s (Garmin profile {profile}). "
+        f"garmin-reader-mcp: stored the Garmin session as {user}'s (Garmin profile {profile}). "
         "Don't use the original copy elsewhere any more: it would sign this one out.",
         file=sys.stderr,
     )
@@ -670,20 +670,20 @@ def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) 
 def _revoke_all() -> int:
     db = state_dir() / "mcp_auth.sqlite"
     if not db.exists():
-        print(f"kcal-mcp: no OAuth database at {db}; nothing to revoke.", file=sys.stderr)
+        print(f"garmin-reader-mcp: no OAuth database at {db}; nothing to revoke.", file=sys.stderr)
         return 0
-    provider = KcalOAuthProvider(db, public_url="")
+    provider = GarminReaderOAuthProvider(db, public_url="")
     try:
         ended = provider.revoke_all()
     finally:
         provider.close()
-    print(f"kcal-mcp: signed out {ended} client authorization(s).", file=sys.stderr)
+    print(f"garmin-reader-mcp: signed out {ended} client authorization(s).", file=sys.stderr)
     return 0
 
 
 def serve_http(server: FastMCP) -> None:
     """Like `server.run(transport="streamable-http")`, but logs why requests
-    were rejected (see kcal.http_log).
+    were rejected (see garmin_reader.http_log).
     """
     uvicorn.run(
         LogClientErrors(server.streamable_http_app()),

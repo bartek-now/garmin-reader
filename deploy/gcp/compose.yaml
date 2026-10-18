@@ -1,24 +1,27 @@
-# kcal on one VM: the server, with Caddy in front of it for HTTPS
+# garmin-reader on one VM: the server, with Caddy in front of it for HTTPS
 # (certificates from Let's Encrypt, renewed automatically).
 # Settings come from .env next to this file (written by setup-vm.sh),
 # including the commit being deployed, which the image records.
 # See docs/deployment.md, "Google Cloud VM".
+# Still kcal, its name from before the rename: the project name prefixes
+# the volumes' real names (kcal_kcal-data holds every user's Garmin session
+# and the OAuth database), so changing it would start from empty volumes.
 name: kcal
 
 services:
-  kcal:
+  garmin-reader:
     build:
       context: ../..
       args:
-        KCAL_GIT_COMMIT: ${KCAL_GIT_COMMIT:-}
+        GARMIN_READER_GIT_COMMIT: ${GARMIN_READER_GIT_COMMIT:-}
     restart: unless-stopped
     environment:
-      KCAL_PUBLIC_URL: https://${KCAL_DOMAIN:?set KCAL_DOMAIN in .env}
-      KCAL_ALLOWED_EMAILS: ${KCAL_ALLOWED_EMAILS:?set KCAL_ALLOWED_EMAILS in .env}
+      GARMIN_READER_PUBLIC_URL: https://${GARMIN_READER_DOMAIN:?set GARMIN_READER_DOMAIN in .env}
+      GARMIN_READER_ALLOWED_EMAILS: ${GARMIN_READER_ALLOWED_EMAILS:?set GARMIN_READER_ALLOWED_EMAILS in .env}
       # Caddy's address, so logs show the real client from X-Forwarded-For.
       FORWARDED_ALLOW_IPS: 172.30.0.10
     volumes:
-      - kcal-data:/data
+      - kcal-data:/data   # named before the rename; see above
     networks: [web]
     # No published port: only Caddy can reach the server.
 
@@ -30,7 +33,7 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      KCAL_DOMAIN: ${KCAL_DOMAIN}
+      GARMIN_READER_DOMAIN: ${GARMIN_READER_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data   # certificates
@@ -38,7 +41,7 @@ services:
     networks:
       web:
         ipv4_address: 172.30.0.10
-    depends_on: [kcal]
+    depends_on: [garmin-reader]
 
 networks:
   web:

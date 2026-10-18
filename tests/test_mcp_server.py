@@ -5,7 +5,7 @@ import threading
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-from kcal import mcp_server
+from garmin_reader import mcp_server
 
 
 class FakeApi:
@@ -32,7 +32,7 @@ def test_tools_registered():
         "get_garmin_day",
         "list_garmin_endpoints",
         "call_garmin_endpoint",
-        "get_kcal_server_info",
+        "get_garmin_reader_info",
     }
 
 
@@ -49,11 +49,11 @@ def test_call_garmin_endpoint_through_mcp():
 def test_server_info_through_mcp():
     import importlib.metadata
 
-    import kcal
+    import garmin_reader
 
-    out = call("get_kcal_server_info", {})
+    out = call("get_garmin_reader_info", {})
     assert out["stale"] is False
-    assert out["version"] == kcal.__version__
+    assert out["version"] == garmin_reader.__version__
     assert out["garminconnect"] == importlib.metadata.version("garminconnect")
 
 
@@ -74,9 +74,9 @@ def test_commit_comes_from_the_image_without_git(monkeypatch):
         raise FileNotFoundError("git")
 
     monkeypatch.setattr(mcp_server.subprocess, "run", no_git)
-    monkeypatch.setenv("KCAL_GIT_COMMIT", "a6d83ce")
+    monkeypatch.setenv("GARMIN_READER_GIT_COMMIT", "a6d83ce")
     assert mcp_server._git_commit() == "a6d83ce"
-    monkeypatch.delenv("KCAL_GIT_COMMIT")
+    monkeypatch.delenv("GARMIN_READER_GIT_COMMIT")
     assert mcp_server._git_commit() is None
 
 

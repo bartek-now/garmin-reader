@@ -1,4 +1,4 @@
-"""Thin wrapper around the Garmin Connect API calls kcal needs."""
+"""Thin wrapper around the Garmin Connect API calls garmin-reader needs."""
 
 from __future__ import annotations
 

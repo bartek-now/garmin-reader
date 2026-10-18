@@ -1,5 +1,5 @@
 [project]
-name = "kcal"
+name = "garmin-reader"
 dynamic = ["version"]
 description = "Fetch daily steps and workout calories from Garmin Connect, with workout steps deduplicated from the daily total."
 requires-python = ">=3.12"
@@ -11,8 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
-kcal = "kcal.cli:main"
-kcal-mcp = "kcal.mcp_server:main"
+garmin-reader = "garmin_reader.cli:main"
+garmin-reader-mcp = "garmin_reader.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -22,4 +22,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "kcal.__version__"}
+version = {attr = "garmin_reader.__version__"}

@@ -46,10 +46,10 @@ from garminconnect import (
 )
 from mcp.server.fastmcp.exceptions import ToolError
 
-from kcal import endpoints, mcp_server
-from kcal.auth import GarminRefreshUnavailable, _guard_token_refresh
-from kcal.oauth import KcalOAuthProvider
-from kcal.settings import HttpSettings
+from garmin_reader import endpoints, mcp_server
+from garmin_reader.auth import GarminRefreshUnavailable, _guard_token_refresh
+from garmin_reader.oauth import GarminReaderOAuthProvider
+from garmin_reader.settings import HttpSettings
 from signed_in import as_user
 
 PUBLIC = "https://abc-def.trycloudflare.com"
@@ -249,7 +249,7 @@ def test_refresh_guard_still_wraps_the_real_client(garmin):
     guarded = garmin.client._refresh_session
     _guard_token_refresh(garmin.client)
     assert garmin.client._refresh_session is guarded  # idempotent
-    assert garmin.client._refresh_session.kcal_refresh_guarded
+    assert garmin.client._refresh_session.garmin_reader_refresh_guarded
     session = FakeGarminApi({"new-access": 200})
     stub(garmin.client, "_api_session", session)
     attempts = refresh_answers(garmin, 200)
@@ -260,7 +260,7 @@ def test_refresh_guard_still_wraps_the_real_client(garmin):
 
 @pytest.mark.parametrize("failure", [429, 500, 503, 408, "timeout", "connection"])
 def test_upstream_still_hides_temporary_refresh_failures(garmin, failure):
-    # Removal check for kcal's HTTP interception. If upstream fixes this,
+    # Removal check for garmin-reader's HTTP interception. If upstream fixes this,
     # revisit the workaround instead of relaxing this assertion.
     session = FakeGarminApi({})
     stub(garmin.client, "_api_session", session)
@@ -343,8 +343,8 @@ USER = "me@example.com"
 @pytest.fixture
 def server(tmp_path, monkeypatch):
     """The HTTP server, with tool calls made as USER."""
-    monkeypatch.setenv("KCAL_STATE_DIR", str(tmp_path))
-    provider = KcalOAuthProvider(tmp_path / "mcp_auth.sqlite", PUBLIC)
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(tmp_path))
+    provider = GarminReaderOAuthProvider(tmp_path / "mcp_auth.sqlite", PUBLIC)
     # Profile verification has separate tests; these exercise errors from the
     # health request itself, after an already successful identity check.
     monkeypatch.setattr(mcp_server, "garmin_profile_id", lambda api: 1)
@@ -458,7 +458,7 @@ def test_temporary_refresh_failure_keeps_session(server, garmin, monkeypatch, fa
 def test_cached_login_refresh_failure_never_falls_back_to_credentials(
     garmin, monkeypatch, tmp_path, failure, exception, credentials,
 ):
-    from kcal import auth
+    from garmin_reader import auth
 
     store = tmp_path / "tokens"
     garmin.client.dump(str(store))
@@ -520,7 +520,7 @@ def test_upstream_cached_login_still_needs_fallback_guard(
     assert logins == ([("owner@example.com", "secret")] if credentials else [])
     assert attempts == ["refresh"]
     assert session.requests == []
-    assert type(garmin.client.kcal_refresh_error) is (
+    assert type(garmin.client.garmin_reader_refresh_error) is (
         GarminConnectTooManyRequestsError if failure == 429 else GarminRefreshUnavailable
     )
 
@@ -594,7 +594,7 @@ def test_training_readiness_range_is_one_request_returning_entries(garmin):
 
 
 def test_summary_reads_the_real_getters_output(garmin):
-    from kcal import summary
+    from garmin_reader import summary
 
     stub(garmin.client, "_api_session", FakeRangeApi())
     days = [date(2026, 8, 1) + timedelta(days=i) for i in range(60)]
@@ -656,7 +656,7 @@ def awaiting_code(garmin, answers):
 
 
 def test_wrong_mfa_code_leaves_the_step_open(garmin):
-    from kcal.login_page import GarminGateway
+    from garmin_reader.login_page import GarminGateway
 
     sso = awaiting_code(garmin, [WRONG, WRONG])
     with pytest.raises(GarminConnectAuthenticationError):
@@ -666,7 +666,7 @@ def test_wrong_mfa_code_leaves_the_step_open(garmin):
 
 
 def test_rate_limited_mfa_code_leaves_the_step_open(garmin):
-    from kcal.login_page import GarminGateway
+    from garmin_reader.login_page import GarminGateway
 
     awaiting_code(garmin, [LIMITED, LIMITED])
     with pytest.raises(GarminConnectTooManyRequestsError):
@@ -704,7 +704,7 @@ def portal_answers(answers):
 def test_portal_code_check_that_got_no_answer_is_unavailable(garmin, answers):
     # garminconnect raises the same authentication error for these as for a
     # wrong code; GarminGateway.finish tells them apart by watching answers.
-    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+    from garmin_reader.login_page import GarminGateway, GarminVerificationUnavailable
 
     sso = awaiting_code(garmin, portal_answers(answers))
     with pytest.raises(GarminVerificationUnavailable):
@@ -719,7 +719,7 @@ def test_portal_code_check_that_got_no_answer_is_unavailable(garmin, answers):
     [(200, {"error": {"status-code": "401"}}), TIMEOUT],  # a 4xx decision is an answer
 ])
 def test_portal_wrong_code_is_still_a_wrong_code(garmin, answers):
-    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+    from garmin_reader.login_page import GarminGateway, GarminVerificationUnavailable
 
     awaiting_code(garmin, answers)
     with pytest.raises(GarminConnectAuthenticationError) as err:
@@ -729,7 +729,7 @@ def test_portal_wrong_code_is_still_a_wrong_code(garmin, answers):
 
 @pytest.mark.parametrize("answers", [[LIMITED, LIMITED], [JSON_LIMITED, JSON_LIMITED], [LIMITED, JSON_LIMITED]])
 def test_portal_rate_limit_passes_through(garmin, answers):
-    from kcal.login_page import GarminGateway
+    from garmin_reader.login_page import GarminGateway
 
     awaiting_code(garmin, answers)
     with pytest.raises(GarminConnectTooManyRequestsError):
@@ -746,7 +746,7 @@ def awaiting_widget_code(garmin, answers):
 
 @pytest.mark.parametrize("answer", [TIMEOUT, (503, {}), (500, {})])
 def test_widget_code_check_that_got_no_answer_is_unavailable(garmin, answer):
-    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+    from garmin_reader.login_page import GarminGateway, GarminVerificationUnavailable
 
     awaiting_widget_code(garmin, [answer if answer is TIMEOUT else page(answer[0], "<html>Error</html>")])
     with pytest.raises(GarminVerificationUnavailable):
@@ -756,7 +756,7 @@ def test_widget_code_check_that_got_no_answer_is_unavailable(garmin, answer):
 
 def test_widget_wrong_code_is_still_a_wrong_code(garmin):
     # The widget answers in HTML: a page that isn't "Success" is an answer.
-    from kcal.login_page import GarminGateway, GarminVerificationUnavailable
+    from garmin_reader.login_page import GarminGateway, GarminVerificationUnavailable
 
     awaiting_widget_code(garmin, [page(200, "<html><title>Enter MFA code</title></html>")])
     with pytest.raises(GarminConnectAuthenticationError) as err:
@@ -765,7 +765,7 @@ def test_widget_wrong_code_is_still_a_wrong_code(garmin):
 
 
 def test_widget_rate_limit_passes_through(garmin):
-    from kcal.login_page import GarminGateway
+    from garmin_reader.login_page import GarminGateway
 
     awaiting_widget_code(garmin, [page(429, "")])
     with pytest.raises(GarminConnectTooManyRequestsError):
@@ -773,7 +773,7 @@ def test_widget_rate_limit_passes_through(garmin):
 
 
 def test_corrected_code_signs_in_and_closes_the_step(garmin):
-    from kcal.login_page import GarminGateway
+    from garmin_reader.login_page import GarminGateway
 
     sso = awaiting_code(garmin, [WRONG, WRONG, ACCEPTED])
     with pytest.raises(GarminConnectAuthenticationError):

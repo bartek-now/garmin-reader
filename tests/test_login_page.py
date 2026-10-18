@@ -17,9 +17,9 @@ from garminconnect import (
 from mcp.server.fastmcp.exceptions import ToolError
 from starlette.testclient import TestClient
 
-from kcal import cli, login_page, mcp_server
-from kcal.oauth import KcalOAuthProvider
-from kcal.settings import HttpSettings, user_token_store
+from garmin_reader import cli, login_page, mcp_server
+from garmin_reader.oauth import GarminReaderOAuthProvider
+from garmin_reader.settings import HttpSettings, user_token_store
 from signed_in import as_user
 
 PUBLIC = "https://abc-def.trycloudflare.com"
@@ -91,13 +91,13 @@ def garmin(monkeypatch):
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
-    monkeypatch.setenv("KCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(tmp_path))
     return tmp_path
 
 
 @pytest.fixture
 def provider(state):
-    p = KcalOAuthProvider(state / "mcp_auth.sqlite", PUBLIC)
+    p = GarminReaderOAuthProvider(state / "mcp_auth.sqlite", PUBLIC)
     yield p
     p.close()
 
@@ -208,7 +208,7 @@ def test_unknown_request_is_expired(client):
 
 def test_direct_form_is_for_refreshing(client):
     r, _ = open_form(client)
-    assert "refresh kcal's Garmin session" in r.text
+    assert "refresh garmin-reader's Garmin session" in r.text
     assert 'value="deny"' not in r.text
 
 
@@ -595,7 +595,7 @@ def test_session_rejected_mid_call(server, provider, as_me, tool, args):
     assert mcp_server._profile_sessions[OWNER].api is None  # the dead session is dropped
 
 
-# --- kcal whoami ----------------------------------------------------------------------
+# --- garmin-reader whoami ----------------------------------------------------------------------
 
 
 def test_whoami_prints_profile_id(monkeypatch, capsys):
@@ -699,7 +699,7 @@ def test_incomplete_session_is_not_saved(client, garmin, state):
 
     garmin.save = save
     r = sign_in(client)
-    assert "didn't issue a session kcal can keep" in r.text
+    assert "didn't issue a session garmin-reader can keep" in r.text
     assert not (state / "users").exists()
 
 
@@ -727,7 +727,7 @@ def test_unwritable_token_store_is_explained(client, garmin):
 
 
 def test_cookie_not_secure_on_plain_http(garmin, state):
-    p = KcalOAuthProvider(state / "a.sqlite", "http://localhost:8000")
+    p = GarminReaderOAuthProvider(state / "a.sqlite", "http://localhost:8000")
     server = mcp_server.build_server(
         HttpSettings(public_url="http://localhost:8000", allowed_emails=ALLOWED), p
     )
@@ -833,7 +833,7 @@ def test_expired_code_step_offers_to_start_again(client, garmin):
 
 
 def test_expired_request_offers_the_way_back(client, garmin, provider, monkeypatch):
-    from kcal import oauth
+    from garmin_reader import oauth
     _, req = start_authorization(client)
     csrf = open_form(client, req)[1]
     later = time.time() + oauth.PENDING_SECONDS + 1
@@ -880,7 +880,7 @@ def test_lockout_page_offers_cancel(client, garmin):
 
 
 def test_expired_requests_are_forgotten_after_an_hour(client, provider, monkeypatch):
-    from kcal import oauth
+    from garmin_reader import oauth
     _, req = start_authorization(client)
     later = time.time() + oauth.PENDING_SECONDS + oauth.RECENT_SECONDS + 1
     monkeypatch.setattr(oauth.time, "time", lambda: later)
@@ -889,7 +889,7 @@ def test_expired_requests_are_forgotten_after_an_hour(client, provider, monkeypa
 
 
 def test_completing_an_expired_request_is_refused(client, provider, monkeypatch):
-    from kcal import oauth
+    from garmin_reader import oauth
     _, req = start_authorization(client)
     later = time.time() + oauth.PENDING_SECONDS + 1
     monkeypatch.setattr(oauth.time, "time", lambda: later)
@@ -983,7 +983,7 @@ def test_garmin_logout_and_sign_in_again(client, garmin, state, monkeypatch):
 
     # 4. The user opens the link and signs in to Garmin again.
     r = client.get(urlsplit(link).path)
-    assert "refresh kcal's Garmin session" in r.text
+    assert "refresh garmin-reader's Garmin session" in r.text
     r = sign_in(client)
     assert "Garmin session refreshed" in r.text
 
@@ -1190,7 +1190,7 @@ def test_replay_entries_are_only_removed_by_their_owner(garmin, provider, state)
             raise RuntimeError("crashed")
         await asyncio.sleep(0.1 * runs[-1])  # the second waiter finishes last
         response = HTMLResponse("temporary failure")
-        response.kcal_replayable = False
+        response.garmin_reader_replayable = False
         return response
 
     async def three():

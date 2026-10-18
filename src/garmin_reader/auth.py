@@ -13,7 +13,7 @@ from pathlib import Path
 
 from garminconnect import Garmin, GarminConnectConnectionError, GarminConnectTooManyRequestsError
 
-from kcal.settings import garmin_token_store
+from garmin_reader.settings import garmin_token_store
 
 
 class GarminLoginError(Exception):
@@ -39,7 +39,7 @@ def is_refresh_unavailable(error: BaseException | None) -> bool:
 
 
 def garmin_profile_id(api: Garmin) -> int:
-    """The account's stable ID: what KCAL_GARMIN_OWNER holds."""
+    """The account's stable ID, which names its folder under users/."""
     return int(api.client.connectapi("/userprofile-service/socialProfile")["profileId"])
 
 
@@ -58,7 +58,7 @@ def login(
 
     Credentials are only needed the first time (or after the cached session
     expires) - after that, `login()` resumes from `token_store` (default
-    KCAL_STATE_DIR/garmin_tokens, i.e. ~/.kcal/garmin_tokens). Without
+    GARMIN_READER_STATE_DIR/garmin_tokens, i.e. ~/.garmin-reader/garmin_tokens). Without
     `env_credentials`, GARMIN_EMAIL and GARMIN_PASSWORD are ignored: a
     user's session must never be replaced by the environment's account.
     """
@@ -76,7 +76,7 @@ def login(
     def checked_login(*args, **kwargs):
         # Loading cached tokens must not fall back to a password login just
         # because the refresh service is temporarily unavailable.
-        if failure := getattr(api.client, "kcal_refresh_error", None):
+        if failure := getattr(api.client, "garmin_reader_refresh_error", None):
             raise failure
         return credential_login(*args, **kwargs)
 
@@ -86,7 +86,7 @@ def login(
     except Exception:
         # Garmin.login also catches refresh errors while loading a cache and
         # may subsequently report missing credentials. Keep the real cause.
-        if failure := getattr(api.client, "kcal_refresh_error", None):
+        if failure := getattr(api.client, "garmin_reader_refresh_error", None):
             raise failure from None
         raise
     finally:
@@ -99,10 +99,10 @@ def _guard_token_refresh(client) -> None:
 
     Reuse the client's reentrant token lock (0.3.17+) so the temporary HTTP
     hook and recorded error are protected even when refresh is called
-    directly. No separate kcal lock is needed. See the upgrade guide.
+    directly. No separate garmin-reader lock is needed. See the upgrade guide.
     """
     refresh = client._refresh_session
-    if getattr(refresh, "kcal_refresh_guarded", False):
+    if getattr(refresh, "garmin_reader_refresh_guarded", False):
         return
     lock = client._token_lock
     if not isinstance(lock, type(threading.RLock())):
@@ -111,7 +111,7 @@ def _guard_token_refresh(client) -> None:
     @functools.wraps(refresh)
     def guarded(*args, **kwargs):
         with lock:
-            client.kcal_refresh_error = None
+            client.garmin_reader_refresh_error = None
             if not getattr(client, "di_token", None):
                 return refresh(*args, **kwargs)
             post = client._http_post
@@ -122,30 +122,30 @@ def _guard_token_refresh(client) -> None:
                 except Exception as err:
                     # No HTTP response: a transport failure, not evidence
                     # that Garmin revoked the refresh token.
-                    client.kcal_refresh_error = GarminRefreshUnavailable(
+                    client.garmin_reader_refresh_error = GarminRefreshUnavailable(
                         "Garmin token refresh could not reach Garmin"
                     )
-                    raise client.kcal_refresh_error from err
+                    raise client.garmin_reader_refresh_error from err
                 if response.status_code == 429:
-                    client.kcal_refresh_error = GarminConnectTooManyRequestsError(
+                    client.garmin_reader_refresh_error = GarminConnectTooManyRequestsError(
                         "Garmin token refresh is rate limited"
                     )
                 elif response.status_code == 408 or response.status_code >= 500:
-                    client.kcal_refresh_error = GarminRefreshUnavailable(
+                    client.garmin_reader_refresh_error = GarminRefreshUnavailable(
                         "Garmin token refresh is temporarily unavailable"
                     )
-                if client.kcal_refresh_error is not None:
-                    raise client.kcal_refresh_error
+                if client.garmin_reader_refresh_error is not None:
+                    raise client.garmin_reader_refresh_error
                 return response
 
             client._http_post = checked_post
             try:
                 result = refresh(*args, **kwargs)
-                if client.kcal_refresh_error is not None:
-                    raise client.kcal_refresh_error
+                if client.garmin_reader_refresh_error is not None:
+                    raise client.garmin_reader_refresh_error
                 return result
             finally:
                 client._http_post = post
 
-    guarded.kcal_refresh_guarded = True
+    guarded.garmin_reader_refresh_guarded = True
     client._refresh_session = guarded

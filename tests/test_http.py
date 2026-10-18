@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from kcal import mcp_server
-from kcal.settings import HttpSettings, garmin_token_store, state_dir
+from garmin_reader import mcp_server
+from garmin_reader.settings import HttpSettings, garmin_token_store, state_dir
 
 PUBLIC = "https://abc-def.trycloudflare.com"
 HEADERS = {
@@ -29,25 +29,25 @@ INIT = {
 
 
 def test_settings_from_env():
-    s = HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC + "/", "KCAL_PORT": "9000"})
+    s = HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC + "/", "GARMIN_READER_PORT": "9000"})
     assert s == HttpSettings(public_url=PUBLIC, port=9000)
     assert s.public_host == "abc-def.trycloudflare.com"
 
 
 def test_settings_flags_override_env():
     s = HttpSettings.from_env(
-        {"KCAL_PUBLIC_URL": "https://old.example", "KCAL_PORT": "9000"},
+        {"GARMIN_READER_PUBLIC_URL": "https://old.example", "GARMIN_READER_PORT": "9000"},
         public_url=PUBLIC, port="9100",
     )
     assert s == HttpSettings(public_url=PUBLIC, port=9100)
 
 
 def test_settings_default_port():
-    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC}).port == 8000
+    assert HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC}).port == 8000
 
 
 def test_settings_require_public_url():
-    with pytest.raises(ValueError, match="KCAL_PUBLIC_URL"):
+    with pytest.raises(ValueError, match="GARMIN_READER_PUBLIC_URL"):
         HttpSettings.from_env({})
 
 
@@ -64,8 +64,8 @@ def test_settings_require_public_url():
     ],
 )
 def test_settings_reject_bad_urls(url):
-    with pytest.raises(ValueError, match="KCAL_PUBLIC_URL"):
-        HttpSettings.from_env({"KCAL_PUBLIC_URL": url})
+    with pytest.raises(ValueError, match="GARMIN_READER_PUBLIC_URL"):
+        HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": url})
 
 
 @pytest.mark.parametrize(
@@ -80,7 +80,7 @@ def test_settings_reject_bad_urls(url):
 )
 def test_settings_reject_credentials_without_echoing_them(url):
     with pytest.raises(ValueError, match="user name or password") as err:
-        HttpSettings.from_env({"KCAL_PUBLIC_URL": url})
+        HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": url})
     assert "secret" not in str(err.value) and "user@" not in str(err.value)
 
 
@@ -88,7 +88,7 @@ def test_settings_reject_credentials_without_echoing_them(url):
     "url", ["http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"]
 )
 def test_settings_allow_http_on_localhost(url):
-    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": url}).public_url == url
+    assert HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": url}).public_url == url
 
 
 @pytest.mark.parametrize(
@@ -102,14 +102,14 @@ def test_settings_allow_http_on_localhost(url):
 )
 def test_settings_drop_default_ports(url, expected):
     # Clients omit default ports from Host/Origin, which must match exactly.
-    s = HttpSettings.from_env({"KCAL_PUBLIC_URL": url})
+    s = HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": url})
     assert s.public_url == expected
     assert s.public_host == expected.split("://")[1]
 
 
 def test_default_port_url_accepts_real_host_header():
     server = mcp_server.build_server(
-        HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC + ":443"})
+        HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC + ":443"})
     )
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         assert post(c, INIT).status_code == 200
@@ -117,13 +117,15 @@ def test_default_port_url_accepts_real_host_header():
 
 @pytest.mark.parametrize("port", ["abc", "0", "70000"])
 def test_settings_reject_bad_ports(port):
-    with pytest.raises(ValueError, match="KCAL_PORT"):
-        HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "KCAL_PORT": port})
+    with pytest.raises(ValueError, match="GARMIN_READER_PORT"):
+        HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC, "GARMIN_READER_PORT": port})
 
 
-def test_state_dir(tmp_path):
-    assert state_dir({}) == Path.home() / ".kcal"
-    assert garmin_token_store({"KCAL_STATE_DIR": str(tmp_path)}) == tmp_path / "garmin_tokens"
+def test_state_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert state_dir({}) == tmp_path / ".garmin-reader"
+    store = tmp_path / "elsewhere"
+    assert garmin_token_store({"GARMIN_READER_STATE_DIR": str(store)}) == store / "garmin_tokens"
 
 
 # --- HTTP transport ---------------------------------------------------------
@@ -145,7 +147,7 @@ def test_initialize_returns_plain_json_without_session(client):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/json")
     assert "mcp-session-id" not in r.headers
-    assert r.json()["result"]["serverInfo"]["name"] == "kcal"
+    assert r.json()["result"]["serverInfo"]["name"] == "garmin-reader"
 
 
 def test_requests_stand_alone_without_initialize(client):
@@ -160,7 +162,7 @@ def test_requests_stand_alone_without_initialize(client):
 def test_tool_call_over_http(client):
     r = post(client, {
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-        "params": {"name": "get_kcal_server_info", "arguments": {}},
+        "params": {"name": "get_garmin_reader_info", "arguments": {}},
     })
     content = r.json()["result"]["content"]
     assert len(content) == 1
@@ -195,8 +197,8 @@ def test_stdio_server_has_no_http_settings():
 @pytest.fixture
 def runs(monkeypatch, tmp_path):
     calls = []
-    # main() opens the OAuth database under KCAL_STATE_DIR: keep it out of ~/.kcal.
-    monkeypatch.setenv("KCAL_STATE_DIR", str(tmp_path))
+    # main() opens the OAuth database under GARMIN_READER_STATE_DIR: keep it out of ~/.garmin-reader.
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(
         mcp_server.FastMCP, "run",
         lambda self, transport="stdio", **_: calls.append((self, transport)),
@@ -204,8 +206,8 @@ def runs(monkeypatch, tmp_path):
     monkeypatch.setattr(
         mcp_server, "serve_http", lambda server: calls.append((server, "streamable-http"))
     )
-    monkeypatch.delenv("KCAL_PUBLIC_URL", raising=False)
-    monkeypatch.delenv("KCAL_PORT", raising=False)
+    monkeypatch.delenv("GARMIN_READER_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("GARMIN_READER_PORT", raising=False)
     return calls
 
 
@@ -233,33 +235,26 @@ def test_main_http_has_no_unauthenticated_mode(runs):
 def test_main_http_requires_allowed_emails(runs, capsys):
     assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
     assert runs == []
-    assert "KCAL_ALLOWED_EMAILS" in capsys.readouterr().err
+    assert "GARMIN_READER_ALLOWED_EMAILS" in capsys.readouterr().err
 
 
 def test_main_http_rejects_entries_that_arent_emails(runs, capsys, monkeypatch):
-    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com, 2426101")
+    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", "me@example.com, 2426101")
     assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
     assert "aren't emails" in capsys.readouterr().err and runs == []
 
 
-def test_main_http_explains_the_old_owner_setting(runs, capsys, monkeypatch):
-    monkeypatch.setenv("KCAL_GARMIN_OWNER", "2426101")
-    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com")
-    assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
-    assert "KCAL_ALLOWED_EMAILS" in capsys.readouterr().err and runs == []
-
-
 def test_allowed_emails_are_lowercased_and_split():
     s = HttpSettings.from_env({
-        "KCAL_PUBLIC_URL": PUBLIC,
-        "KCAL_ALLOWED_EMAILS": " Me@Example.com,friend@example.com\n a@b.pl ",
+        "GARMIN_READER_PUBLIC_URL": PUBLIC,
+        "GARMIN_READER_ALLOWED_EMAILS": " Me@Example.com,friend@example.com\n a@b.pl ",
     })
     assert s.allowed_emails == {"me@example.com", "friend@example.com", "a@b.pl"}
 
 
 def test_allowed_emails_flag_wins_over_env():
     s = HttpSettings.from_env(
-        {"KCAL_PUBLIC_URL": PUBLIC, "KCAL_ALLOWED_EMAILS": "env@example.com"},
+        {"GARMIN_READER_PUBLIC_URL": PUBLIC, "GARMIN_READER_ALLOWED_EMAILS": "env@example.com"},
         allowed_emails="flag@example.com",
     )
     assert s.allowed_emails == {"flag@example.com"}
@@ -268,12 +263,12 @@ def test_allowed_emails_flag_wins_over_env():
 def test_main_http_reports_bad_settings(runs, capsys):
     assert mcp_server.main(["--http"]) == 2
     assert runs == []
-    assert "KCAL_PUBLIC_URL" in capsys.readouterr().err
+    assert "GARMIN_READER_PUBLIC_URL" in capsys.readouterr().err
 
 
 def test_main_http_runs_streamable_http(runs, monkeypatch):
-    monkeypatch.setenv("KCAL_PUBLIC_URL", PUBLIC)
-    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com")
+    monkeypatch.setenv("GARMIN_READER_PUBLIC_URL", PUBLIC)
+    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", "me@example.com")
     assert mcp_server.main(["--http", "--port", "8123"]) == 0
     [(server, transport)] = runs
     assert transport == "streamable-http"
@@ -289,13 +284,13 @@ def test_main_http_runs_streamable_http(runs, monkeypatch):
 def logged_client(caplog):
     server = mcp_server.build_server(HttpSettings(public_url=PUBLIC))
     app = mcp_server.LogClientErrors(server.streamable_http_app())
-    caplog.set_level("WARNING", logger="kcal.http")
+    caplog.set_level("WARNING", logger="garmin_reader.http")
     with TestClient(app, base_url=PUBLIC) as c:
         yield c
 
 
 def rejections(caplog):
-    return [r.getMessage() for r in caplog.records if r.name == "kcal.http"]
+    return [r.getMessage() for r in caplog.records if r.name == "garmin_reader.http"]
 
 
 LIST = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
@@ -344,45 +339,45 @@ def test_does_not_log_success_or_404(logged_client, caplog):
 
 
 def test_host_defaults_to_loopback():
-    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC}).host == "127.0.0.1"
+    assert HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC}).host == "127.0.0.1"
 
 
 @pytest.mark.parametrize("value", ["0.0.0.0", "::", "10.0.0.5"])
 def test_host_from_env(value):
-    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "KCAL_HOST": value}).host == value
+    assert HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC, "GARMIN_READER_HOST": value}).host == value
 
 
 def test_host_flag_wins_over_env():
-    s = HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "KCAL_HOST": "0.0.0.0"}, host="::1")
+    s = HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC, "GARMIN_READER_HOST": "0.0.0.0"}, host="::1")
     assert s.host == "::1"
 
 
 @pytest.mark.parametrize("value", ["example.com", "0.0.0.0:8000", "everywhere"])
 def test_host_must_be_an_ip(value):
-    with pytest.raises(ValueError, match="KCAL_HOST"):
-        HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "KCAL_HOST": value})
+    with pytest.raises(ValueError, match="GARMIN_READER_HOST"):
+        HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC, "GARMIN_READER_HOST": value})
 
 
-def test_platform_port_is_used_when_kcal_port_isnt_set():
+def test_platform_port_is_used_when_garmin_reader_port_isnt_set():
     # Cloud Run and similar platforms tell the server its port in $PORT.
-    assert HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "PORT": "8080"}).port == 8080
-    s = HttpSettings.from_env({"KCAL_PUBLIC_URL": PUBLIC, "PORT": "8080", "KCAL_PORT": "9000"})
+    assert HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC, "PORT": "8080"}).port == 8080
+    s = HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": PUBLIC, "PORT": "8080", "GARMIN_READER_PORT": "9000"})
     assert s.port == 9000
 
 
 def test_main_listens_where_told(runs, monkeypatch):
-    monkeypatch.setenv("KCAL_PUBLIC_URL", PUBLIC)
-    monkeypatch.setenv("KCAL_ALLOWED_EMAILS", "me@example.com")
-    monkeypatch.setenv("KCAL_HOST", "0.0.0.0")
+    monkeypatch.setenv("GARMIN_READER_PUBLIC_URL", PUBLIC)
+    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", "me@example.com")
+    monkeypatch.setenv("GARMIN_READER_HOST", "0.0.0.0")
     assert mcp_server.main(["--http"]) == 0
     [(server, _)] = runs
     assert server.settings.host == "0.0.0.0"
 
 
 def test_healthz_needs_no_sign_in_and_says_nothing_else(tmp_path):
-    from kcal.oauth import KcalOAuthProvider
+    from garmin_reader.oauth import GarminReaderOAuthProvider
 
-    provider = KcalOAuthProvider(tmp_path / "a.sqlite", PUBLIC)
+    provider = GarminReaderOAuthProvider(tmp_path / "a.sqlite", PUBLIC)
     server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({"me@example.com"})), provider)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         assert post(c, INIT).status_code == 401  # /mcp still needs a token

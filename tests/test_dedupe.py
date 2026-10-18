@@ -1,4 +1,4 @@
-from kcal.dedupe import build_day_stats, build_weight_row
+from garmin_reader.dedupe import build_day_stats, build_weight_row
 
 SUMMARY = {
     "totalSteps": 10000,

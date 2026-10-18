@@ -1,4 +1,4 @@
-"""kcal fetch: daily steps and workout calories from Garmin Connect."""
+"""garmin-reader fetch: daily steps and workout calories from Garmin Connect."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import csv
 import sys
 from pathlib import Path
 
-from kcal.auth import garmin_profile_id, login
-from kcal.daily import fetch_days, resolve_days
-from kcal.models import DayStats
+from garmin_reader.auth import garmin_profile_id, login
+from garmin_reader.daily import fetch_days, resolve_days
+from garmin_reader.models import DayStats
 
 
 def _render_csv(stats: list[DayStats]) -> str:
@@ -71,7 +71,7 @@ def _cmd_whoami(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="kcal")
+    parser = argparse.ArgumentParser(prog="garmin-reader")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     fetch = subparsers.add_parser(
@@ -93,9 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--output", help="Write to this file instead of stdout")
     fetch.set_defaults(func=_cmd_fetch)
 
-    whoami = subparsers.add_parser(
-        "whoami", help="Show the logged-in Garmin account (its profile ID is KCAL_GARMIN_OWNER)"
-    )
+    whoami = subparsers.add_parser("whoami", help="Show the logged-in Garmin account")
     whoami.set_defaults(func=_cmd_whoami)
 
     return parser

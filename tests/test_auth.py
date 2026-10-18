@@ -4,7 +4,7 @@ import threading
 import pytest
 from garminconnect import GarminConnectAuthenticationError
 
-from kcal import auth
+from garmin_reader import auth
 
 
 class Client:
@@ -28,7 +28,7 @@ def constructed(monkeypatch):
             seen.append(kwargs)
 
         def login(self, token_store):
-            assert self.client._refresh_session.kcal_refresh_guarded
+            assert self.client._refresh_session.garmin_reader_refresh_guarded
             assert Path(token_store).parent.is_dir()
             seen.append(token_store)
 
@@ -39,7 +39,7 @@ def constructed(monkeypatch):
 def test_login_uses_environment_credentials_and_state_directory(constructed, monkeypatch, tmp_path):
     monkeypatch.setenv("GARMIN_EMAIL", "env@example.com")
     monkeypatch.setenv("GARMIN_PASSWORD", "env-password")
-    monkeypatch.setenv("KCAL_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(tmp_path / "state"))
     prompt = lambda: "123456"
     api = auth.login(prompt_mfa=prompt)
     assert constructed == [
@@ -47,21 +47,21 @@ def test_login_uses_environment_credentials_and_state_directory(constructed, mon
         str(tmp_path / "state" / "garmin_tokens"),
     ]
     assert isinstance(api.client, Client)
-    assert api.client._refresh_session.kcal_refresh_guarded
+    assert api.client._refresh_session.garmin_reader_refresh_guarded
     assert api.client.login.__func__ is Client.login  # temporary guard restored
 
 
 def test_explicit_login_settings_win(constructed, monkeypatch, tmp_path):
     monkeypatch.setenv("GARMIN_EMAIL", "env@example.com")
     monkeypatch.setenv("GARMIN_PASSWORD", "env-password")
-    monkeypatch.setenv("KCAL_STATE_DIR", str(tmp_path / "ignored"))
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(tmp_path / "ignored"))
     store = tmp_path / "explicit" / "tokens"
     api = auth.login("explicit@example.com", "explicit-password", token_store=store)
     assert constructed == [
         {"email": "explicit@example.com", "password": "explicit-password", "prompt_mfa": auth._prompt_mfa},
         str(store),
     ]
-    assert api.client._refresh_session.kcal_refresh_guarded
+    assert api.client._refresh_session.garmin_reader_refresh_guarded
     assert not (tmp_path / "ignored").exists()
 
 
@@ -72,7 +72,7 @@ def test_cached_login_needs_no_credentials(constructed, monkeypatch, tmp_path):
     assert constructed[0]["email"] is None
     assert constructed[0]["password"] is None
     assert constructed[1] == str(tmp_path / "tokens")
-    assert api.client._refresh_session.kcal_refresh_guarded
+    assert api.client._refresh_session.garmin_reader_refresh_guarded
 
 
 def test_login_preserves_authentication_failure(monkeypatch, tmp_path):

@@ -3,7 +3,7 @@ import json
 import pytest
 from garminconnect import GarminConnectConnectionError
 
-from kcal import endpoints
+from garmin_reader import endpoints
 
 
 class FakeApi:

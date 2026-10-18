@@ -11,9 +11,9 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from starlette.testclient import TestClient
 
-from kcal import mcp_server, oauth
-from kcal.oauth import KcalOAuthProvider
-from kcal.settings import HttpSettings
+from garmin_reader import mcp_server, oauth
+from garmin_reader.oauth import GarminReaderOAuthProvider
+from garmin_reader.settings import HttpSettings
 
 PUBLIC = "https://abc-def.trycloudflare.com"
 RESOURCE = PUBLIC + "/mcp"
@@ -41,7 +41,7 @@ def db(tmp_path):
 
 @pytest.fixture
 def provider(db):
-    p = KcalOAuthProvider(db, PUBLIC)
+    p = GarminReaderOAuthProvider(db, PUBLIC)
     yield p
     p.close()
 
@@ -162,7 +162,7 @@ def test_full_flow_then_mcp_works(client, provider):
     assert tokens["scope"] == oauth.SCOPE
     r = mcp_call(client, tokens["access_token"])
     assert r.status_code == 200
-    assert r.json()["result"]["serverInfo"]["name"] == "kcal"
+    assert r.json()["result"]["serverInfo"]["name"] == "garmin-reader"
 
 
 def test_completion_redirects_back_with_state(client, provider):
@@ -323,7 +323,7 @@ def test_token_for_another_resource_is_refused(client, provider, db):
 def test_clients_and_tokens_survive_a_restart(client, provider, db):
     client_id, tokens = connect(client, provider)
     provider.close()
-    reopened = KcalOAuthProvider(db, PUBLIC)
+    reopened = GarminReaderOAuthProvider(db, PUBLIC)
     server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), reopened)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         assert mcp_call(c, tokens["access_token"]).status_code == 200
@@ -443,7 +443,7 @@ def test_resource_matches_regardless_of_host_case(client, provider):
 
 
 def test_public_url_host_is_lowercased():
-    s = HttpSettings.from_env({"KCAL_PUBLIC_URL": "https://Abc-DEF.trycloudflare.com"})
+    s = HttpSettings.from_env({"GARMIN_READER_PUBLIC_URL": "https://Abc-DEF.trycloudflare.com"})
     assert s.public_url == PUBLIC
 
 
@@ -466,21 +466,21 @@ def test_oauth_needs_http_settings(provider):
 def test_state_is_owner_only(tmp_path):
     import os
     db = tmp_path / "state" / "mcp_auth.sqlite"
-    KcalOAuthProvider(db, PUBLIC).close()
+    GarminReaderOAuthProvider(db, PUBLIC).close()
     assert os.stat(db.parent).st_mode & 0o077 == 0
     assert os.stat(db).st_mode & 0o077 == 0
 
 
 def test_revoke_all_command(client, provider, db, monkeypatch, capsys):
     _, tokens = connect(client, provider)
-    monkeypatch.setenv("KCAL_STATE_DIR", str(db.parent))
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(db.parent))
     assert mcp_server.main(["--revoke-all"]) == 0
     assert "signed out 1 client authorization" in capsys.readouterr().err
     assert mcp_call(client, tokens["access_token"]).status_code == 401
 
 
 def test_revoke_all_command_without_database(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("KCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(tmp_path))
     assert mcp_server.main(["--revoke-all"]) == 0
     assert "nothing to revoke" in capsys.readouterr().err
     assert not (tmp_path / "mcp_auth.sqlite").exists()
@@ -492,7 +492,7 @@ def test_removed_user_loses_tokens_and_profile(client, provider, db):
     provider.set_garmin_profile(USER, 1)
     provider.set_garmin_profile(OTHER, 2)
     provider.close()
-    restarted = KcalOAuthProvider(db, PUBLIC)
+    restarted = GarminReaderOAuthProvider(db, PUBLIC)
     try:
         assert restarted.configure_allowed(frozenset({OTHER})) == [1]
         server = mcp_server.build_server(
@@ -539,7 +539,7 @@ def test_tokens_from_before_multiple_users_are_dropped(client, provider, db):
         raw.execute("UPDATE tokens SET subject = '12345' WHERE token_hash = ?",
                     (oauth._hash(old["access_token"]),))
         raw.execute("UPDATE auth_state SET owner = '12345'")
-    migrated = KcalOAuthProvider(db, PUBLIC)
+    migrated = GarminReaderOAuthProvider(db, PUBLIC)
     try:
         server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), migrated)
         with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
@@ -566,7 +566,7 @@ def test_provider_rejects_users_who_arent_allowed(client, provider):
 
 
 def test_unconfigured_provider_allows_nobody(db):
-    p = KcalOAuthProvider(db, PUBLIC)
+    p = GarminReaderOAuthProvider(db, PUBLIC)
     try:
         assert not p.is_allowed(USER)
         assert p.garmin_profile(USER) is None
@@ -577,7 +577,7 @@ def test_unconfigured_provider_allows_nobody(db):
 def test_revoke_cli_invalidates_codes_and_waiting_logins(client, provider, db, monkeypatch):
     client_id, code, verifier = authorized_code(client, provider)
     req = query(start_authorize(client, client_id, pkce()[1]).headers["location"])["req"]
-    monkeypatch.setenv("KCAL_STATE_DIR", str(db.parent))
+    monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(db.parent))
     assert mcp_server.main(["--revoke-all"]) == 0
     r = exchange_code(client, client_id, code, verifier)
     assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
@@ -604,7 +604,7 @@ def test_revocation_between_loading_and_exchanging(client, provider, db, kind):
         loaded = asyncio.run(provider.load_refresh_token(registered, tokens["refresh_token"]))
         exchange = lambda: provider.exchange_refresh_token(registered, loaded, [oauth.SCOPE])
     assert loaded is not None
-    other_process = KcalOAuthProvider(db, PUBLIC)
+    other_process = GarminReaderOAuthProvider(db, PUBLIC)
     try:
         other_process.revoke_all()
         with pytest.raises(oauth.TokenError):

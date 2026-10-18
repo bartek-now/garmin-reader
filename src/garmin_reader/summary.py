@@ -15,10 +15,10 @@ from typing import Any, Literal
 
 from garminconnect import GarminConnectAuthenticationError, GarminConnectTooManyRequestsError
 
-from kcal.auth import GarminLoginError, is_refresh_unavailable
-from kcal.client import fetch_activities, fetch_day_summary, fetch_weigh_ins
-from kcal.dedupe import build_day_stats, build_weight_row
-from kcal.models import Workout
+from garmin_reader.auth import GarminLoginError, is_refresh_unavailable
+from garmin_reader.client import fetch_activities, fetch_day_summary, fetch_weigh_ins
+from garmin_reader.dedupe import build_day_stats, build_weight_row
+from garmin_reader.models import Workout
 
 Group = Literal[
     "activity", "heart", "stress", "lifestyle", "weight", "workouts", "hrv", "sleep", "readiness"
