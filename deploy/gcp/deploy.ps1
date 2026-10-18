@@ -68,12 +68,12 @@ $Emails = ($AllowedEmails | ForEach-Object { $_.ToLowerInvariant() } | Sort-Obje
 $Region = $Zone -replace '-[a-z]$', ''
 $Vm = 'kcal-mcp'
 $Address = 'kcal-mcp-ip'
-$Firewall = 'kcal-mcp-web'
-$SshFirewall = 'kcal-mcp-ssh-iap'
+$Firewall = 'garmin-mcp-web'
+$SshFirewall = 'garmin-mcp-ssh-iap'
 # Google's Identity-Aware Proxy, which SSH goes through, after checking
 # the caller's Google sign-in.
 $IapRange = '35.235.240.0/20'
-$Tag = 'kcal-mcp'
+$Tag = 'garmin-mcp'
 $ProjectArgs = @('--project', $Project)
 
 function Invoke-GCloud {

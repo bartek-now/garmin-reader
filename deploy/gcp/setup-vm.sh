@@ -35,12 +35,7 @@ if ! grep -q '^/swapfile ' /etc/fstab; then
 fi
 grep -q '^/swapfile ' /proc/swaps || sudo swapon /swapfile
 
-# The code, at exactly the requested ref. Before the rename it lived in
-# /opt/kcal; compose.yaml pins the project name, so moving it keeps the
-# containers and volumes.
-if [ -d /opt/kcal ] && [ ! -e "$DIR" ]; then
-    sudo mv /opt/kcal "$DIR"
-fi
+# The code, at exactly the requested ref.
 if [ ! -d "$DIR/.git" ]; then
     sudo git clone -q "$REPO" "$DIR"
 fi
