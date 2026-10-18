@@ -244,13 +244,6 @@ def test_main_http_rejects_entries_that_arent_emails(runs, capsys, monkeypatch):
     assert "aren't emails" in capsys.readouterr().err and runs == []
 
 
-def test_main_http_explains_the_old_owner_setting(runs, capsys, monkeypatch):
-    monkeypatch.setenv("KCAL_GARMIN_OWNER", "2426101")
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", "me@example.com")
-    assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
-    assert "GARMIN_READER_ALLOWED_EMAILS" in capsys.readouterr().err and runs == []
-
-
 def test_allowed_emails_are_lowercased_and_split():
     s = HttpSettings.from_env({
         "GARMIN_READER_PUBLIC_URL": PUBLIC,

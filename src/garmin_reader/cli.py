@@ -93,9 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--output", help="Write to this file instead of stdout")
     fetch.set_defaults(func=_cmd_fetch)
 
-    whoami = subparsers.add_parser(
-        "whoami", help="Show the logged-in Garmin account (its profile ID is KCAL_GARMIN_OWNER)"
-    )
+    whoami = subparsers.add_parser("whoami", help="Show the logged-in Garmin account")
     whoami.set_defaults(func=_cmd_whoami)
 
     return parser

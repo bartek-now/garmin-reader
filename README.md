@@ -163,7 +163,3 @@ the user's Garmin profile before tools can read any health data.
 | `GARMIN_READER_PORT` | `--port` | `$PORT`, else `8000` |
 | `GARMIN_READER_HOST` | `--host` | `127.0.0.1` (`0.0.0.0` in a container) |
 | `GARMIN_READER_STATE_DIR` | | `~/.garmin-reader` (`users/<profile>/` with each user's Garmin tokens; `mcp_auth.sqlite` with OAuth clients, hashed tokens and users) |
-
-Before 1.0.0 this project was called kcal: its settings were `KCAL_*`, its
-folder `~/.kcal` and its commands `kcal` and `kcal-mcp`. Rename them to
-switch.

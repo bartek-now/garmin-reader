@@ -74,11 +74,6 @@ class HttpSettings:
         GARMIN_READER_ALLOWED_EMAILS. Raises ValueError naming the setting
         that's wrong.
         """
-        if env.get("KCAL_GARMIN_OWNER"):
-            raise ValueError(
-                "KCAL_GARMIN_OWNER is no longer used: list the Garmin emails allowed "
-                "to sign in in GARMIN_READER_ALLOWED_EMAILS instead"
-            )
         url = public_url or env.get("GARMIN_READER_PUBLIC_URL")
         if not url:
             raise ValueError(

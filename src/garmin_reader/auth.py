@@ -39,7 +39,7 @@ def is_refresh_unavailable(error: BaseException | None) -> bool:
 
 
 def garmin_profile_id(api: Garmin) -> int:
-    """The account's stable ID: what KCAL_GARMIN_OWNER holds."""
+    """The account's stable ID, which names its folder under users/."""
     return int(api.client.connectapi("/userprofile-service/socialProfile")["profileId"])
 
 

@@ -85,8 +85,6 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
 - **Adding or removing users:** change `GARMIN_READER_ALLOWED_EMAILS` and restart.
   A new user adds the connector and signs in at `/login`. A removed user is
   signed out at the start, and their stored Garmin session is deleted.
-  Upgrading from a single-owner version (`KCAL_GARMIN_OWNER`) signs every
-  client out once; reconnect them.
 - **Garmin session expired:** the tools reply with a link to `/login`; signing
   in there fixes it without reconnecting anything.
 - **Logs** go to stdout: every request's status line, plus the reason for any

@@ -196,8 +196,7 @@ All from environment variables (CLI flags may override), no hard-coded paths:
 | `GARMIN_READER_ALLOWED_EMAILS` | — (required with `--http`) | Garmin login emails allowed to log in, comma-separated. |
 | `GARMIN_READER_STATE_DIR` | `~/.garmin-reader` | Holds `users/` (each HTTP user's Garmin session), `garmin_tokens/` (the CLI's and stdio's) and `mcp_auth.sqlite`. |
 
-The server refuses to start in HTTP mode without the required settings, or
-with the single-owner `KCAL_GARMIN_OWNER` still set.
+The server refuses to start in HTTP mode without the required settings.
 
 Quick tunnel: `cloudflared tunnel --url http://localhost:8000` prints a new
 `*.trycloudflare.com` URL on every start. Set `GARMIN_READER_PUBLIC_URL` to it, start
