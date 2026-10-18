@@ -39,16 +39,10 @@ grep -q '^/swapfile ' /proc/swaps || sudo swapon /swapfile
 if [ ! -d "$DIR/.git" ]; then
     sudo git clone -q "$REPO" "$DIR"
 fi
-# Follow the repository if it moved, and drop branches deleted or renamed
-# on GitHub, so a stale origin/<ref> is never deployed.
-sudo git -C "$DIR" remote set-url origin "$REPO"
+# Prune, so a branch deleted on GitHub can't be deployed from a stale copy.
 sudo git -C "$DIR" fetch -q --prune --tags origin
 sudo git -C "$DIR" checkout -q --detach "origin/$REF" 2>/dev/null \
     || sudo git -C "$DIR" checkout -q --detach "$REF"
-# Drop local branches (the clone made one): a ref that isn't on GitHub must
-# fail above, not fall back to an old local branch of the same name.
-sudo git -C "$DIR" for-each-ref --format='%(refname)' refs/heads \
-    | xargs -r -n1 sudo git -C "$DIR" update-ref -d
 echo "garmin-reader at $(sudo git -C "$DIR" log -1 --format='%h %s')"
 
 # Settings, readable by root only.
