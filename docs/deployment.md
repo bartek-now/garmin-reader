@@ -97,16 +97,12 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
 certificates, renewed automatically):
 
 - `deploy.ps1` runs on your PC, in PowerShell. It creates what's missing in
-  the Google Cloud project (a static IP `kcal-mcp-ip`, the firewall rules
-  below, and the VM `kcal-mcp`), then runs `setup-vm.sh` on the VM. These
-  keep their names from before the rename: a static IP can't be renamed.
+  the Google Cloud project (a static IP `garmin-mcp-ip`, the firewall rules
+  below, and the VM `garmin-mcp`), then runs `setup-vm.sh` on the VM.
 - `setup-vm.sh` installs Docker, checks out the requested commit from GitHub
   into `/opt/garmin-reader`, writes the settings to `deploy/gcp/.env` there and
   starts [compose.yaml](../deploy/gcp/compose.yaml): the server (port 8000,
-  reachable only by Caddy) and Caddy (ports 80 and 443). A VM set up
-  before the rename has the code in `/opt/kcal`; the first deployment
-  after it moves it. The Compose project is still called `kcal`, since
-  the volumes are named after it.
+  reachable only by Caddy) and Caddy (ports 80 and 443).
 
 The VM runs Debian 12 with a 30 GB standard disk and no service account (it
 needs no Google Cloud access). The free tier covers one e2-micro in
@@ -118,13 +114,13 @@ default network's rules that open SSH, RDP and ping to the internet
 (`default-allow-ssh`, `default-allow-rdp`, `default-allow-icmp`), which
 would affect any other VM in the project. What stays open:
 
-- `kcal-mcp-web`: ports 80 and 443 from anywhere. You sign in at `/login`
+- `garmin-mcp-web`: ports 80 and 443 from anywhere. You sign in at `/login`
   from whatever network you're on, and Let's Encrypt checks the hostname
   from addresses it doesn't publish. Caddy refuses requests for any other
   hostname; the MCP and OAuth endpoints require a token or a Garmin
   sign-in. The AI providers' published address ranges aren't used to
   restrict them further: ChatGPT's list changes and has gaps.
-- `kcal-mcp-ssh-iap`: SSH only from Google's Identity-Aware Proxy
+- `garmin-mcp-ssh-iap`: SSH only from Google's Identity-Aware Proxy
   (`35.235.240.0/20`), which checks your Google sign-in first. gcloud goes
   through it with `--tunnel-through-iap`.
 
@@ -149,7 +145,7 @@ branch, tag or commit; default `main`). It rebuilds and restarts; the
 volumes survive. **Adding or removing a user:** edit `allowedEmails` in
 `settings.local.json` and run `deploy.ps1`.
 
-**On the VM** (`gcloud compute ssh kcal-mcp --zone us-east1-b --tunnel-through-iap`), from
+**On the VM** (`gcloud compute ssh garmin-mcp --zone us-east1-b --tunnel-through-iap`), from
 `/opt/garmin-reader/deploy/gcp`:
 
 - logs: `sudo docker compose logs -f garmin-reader`;
