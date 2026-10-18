@@ -9,7 +9,7 @@ set -euo pipefail
 DOMAIN=${1:?domain}
 EMAILS=${2:?allowed emails}
 REF=${3:?git ref}
-REPO=https://github.com/bartek-now/kcal.git
+REPO=https://github.com/bartek-now/garmin-reader.git
 DIR=/opt/kcal
 
 # Docker Engine and Compose from Docker's apt repository.
@@ -39,7 +39,10 @@ grep -q '^/swapfile ' /proc/swaps || sudo swapon /swapfile
 if [ ! -d "$DIR/.git" ]; then
     sudo git clone -q "$REPO" "$DIR"
 fi
-sudo git -C "$DIR" fetch -q --tags origin
+# Follow the repository if it moved, and drop branches deleted or renamed
+# on GitHub, so a stale origin/<ref> is never deployed.
+sudo git -C "$DIR" remote set-url origin "$REPO"
+sudo git -C "$DIR" fetch -q --prune --tags origin
 sudo git -C "$DIR" checkout -q --detach "origin/$REF" 2>/dev/null \
     || sudo git -C "$DIR" checkout -q --detach "$REF"
 echo "kcal at $(sudo git -C "$DIR" log -1 --format='%h %s')"

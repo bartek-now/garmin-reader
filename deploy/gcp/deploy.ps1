@@ -25,7 +25,7 @@ param(
     [string[]]$AllowedEmails,
     # Branch, tag or commit to deploy; it must be pushed to GitHub.
     [ValidatePattern('^[A-Za-z0-9._/-]+$')]
-    [string]$Ref = 'master',
+    [string]$Ref = 'main',
     # Google Cloud project. Required: gcloud's current one may be another account's.
     [string]$Project,
     # The free tier covers an e2-micro in us-east1, us-central1 and us-west1 only.

@@ -143,7 +143,7 @@ would affect any other VM in the project. What stays open:
    `https://<hostname>/mcp` and signs in to Garmin when asked.
 
 **Updating:** push to GitHub, then run `deploy.ps1` again (`-Ref` picks a
-branch, tag or commit; default `master`). It rebuilds and restarts; the
+branch, tag or commit; default `main`). It rebuilds and restarts; the
 volumes survive. **Adding or removing a user:** edit `allowedEmails` in
 `settings.local.json` and run `deploy.ps1`.
 
