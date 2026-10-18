@@ -102,8 +102,7 @@ certificates, renewed automatically):
 - `setup-vm.sh` installs Docker, checks out the requested commit from GitHub
   into `/opt/garmin-reader`, writes the settings to `deploy/gcp/.env` there and
   starts [compose.yaml](../deploy/gcp/compose.yaml): the server (port 8000,
-  reachable only by Caddy) and Caddy (ports 80 and 443). The Compose
-  project is still called `kcal`, since the volumes are named after it.
+  reachable only by Caddy) and Caddy (ports 80 and 443).
 
 The VM runs Debian 12 with a 30 GB standard disk and no service account (it
 needs no Google Cloud access). The free tier covers one e2-micro in
