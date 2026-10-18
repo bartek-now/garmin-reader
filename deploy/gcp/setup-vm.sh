@@ -10,7 +10,7 @@ DOMAIN=${1:?domain}
 EMAILS=${2:?allowed emails}
 REF=${3:?git ref}
 REPO=https://github.com/bartek-now/garmin-reader.git
-DIR=/opt/kcal
+DIR=/opt/garmin-reader
 
 # Docker Engine and Compose from Docker's apt repository.
 if ! command -v docker >/dev/null; then
@@ -35,7 +35,12 @@ if ! grep -q '^/swapfile ' /etc/fstab; then
 fi
 grep -q '^/swapfile ' /proc/swaps || sudo swapon /swapfile
 
-# The code, at exactly the requested ref.
+# The code, at exactly the requested ref. Before the rename it lived in
+# /opt/kcal; compose.yaml pins the project name, so moving it keeps the
+# containers and volumes.
+if [ -d /opt/kcal ] && [ ! -e "$DIR" ]; then
+    sudo mv /opt/kcal "$DIR"
+fi
 if [ ! -d "$DIR/.git" ]; then
     sudo git clone -q "$REPO" "$DIR"
 fi
@@ -45,12 +50,16 @@ sudo git -C "$DIR" remote set-url origin "$REPO"
 sudo git -C "$DIR" fetch -q --prune --tags origin
 sudo git -C "$DIR" checkout -q --detach "origin/$REF" 2>/dev/null \
     || sudo git -C "$DIR" checkout -q --detach "$REF"
-echo "kcal at $(sudo git -C "$DIR" log -1 --format='%h %s')"
+# Drop local branches (the clone made one): a ref that isn't on GitHub must
+# fail above, not fall back to an old local branch of the same name.
+sudo git -C "$DIR" for-each-ref --format='%(refname)' refs/heads \
+    | xargs -r -n1 sudo git -C "$DIR" update-ref -d
+echo "garmin-reader at $(sudo git -C "$DIR" log -1 --format='%h %s')"
 
 # Settings, readable by root only.
 sudo install -m 600 /dev/null "$DIR/deploy/gcp/.env"
 COMMIT=$(sudo git -C "$DIR" rev-parse --short HEAD)
-printf 'KCAL_DOMAIN=%s\nKCAL_ALLOWED_EMAILS=%s\nKCAL_GIT_COMMIT=%s\n' "$DOMAIN" "$EMAILS" "$COMMIT" \
+printf 'GARMIN_READER_DOMAIN=%s\nGARMIN_READER_ALLOWED_EMAILS=%s\nGARMIN_READER_GIT_COMMIT=%s\n' "$DOMAIN" "$EMAILS" "$COMMIT" \
     | sudo tee "$DIR/deploy/gcp/.env" >/dev/null
 
 cd "$DIR/deploy/gcp"

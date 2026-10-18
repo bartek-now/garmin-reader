@@ -1,4 +1,4 @@
-# kcal
+# garmin-reader
 
 Fetches daily steps and workout calorie data from Garmin Connect.
 
@@ -35,16 +35,16 @@ export GARMIN_EMAIL=you@example.com
 export GARMIN_PASSWORD=yourpassword
 ```
 
-The first login caches a session token under `~/.kcal/garmin_tokens`, so
+The first login caches a session token under `~/.garmin-reader/garmin_tokens`, so
 credentials aren't needed again until that session expires. If your account
 has MFA enabled, you'll be prompted for the code on first login.
 
 ## Usage
 
 ```
-kcal fetch --date 2026-07-06
-kcal fetch --from 2026-07-01 --to 2026-07-07 --output week.csv
-kcal fetch --from 2026-07-01
+garmin-reader fetch --date 2026-07-06
+garmin-reader fetch --from 2026-07-01 --to 2026-07-07 --output week.csv
+garmin-reader fetch --from 2026-07-01
 ```
 
 Output is CSV, printed to stdout unless `--output` is given.
@@ -66,11 +66,11 @@ pytest
 
 Before upgrading garminconnect, follow the
 [Garmin library upgrade checklist](docs/garmin-library-upgrades.md). It lists
-the private hooks and library behavior kcal depends on, and the checks to run.
+the private hooks and library behavior garmin-reader depends on, and the checks to run.
 
 ## MCP server
 
-`kcal-mcp` runs a stdio MCP server with five tools:
+`garmin-reader-mcp` runs a stdio MCP server with five tools:
 
 - `get_garmin_summary` (`date`, or `from_date`/`to_date`; defaults to
   yesterday; optional `metrics`): compact numbers per day across a range, for
@@ -104,20 +104,20 @@ the private hooks and library behavior kcal depends on, and the checks to run.
   366 days (checked before Garmin is asked, since some range endpoints make
   a request per few weeks), and results over ~50k chars are replaced by a
   notice asking for a narrower request.
-- `get_kcal_server_info`: the running server's kcal version, git commit and
+- `get_garmin_reader_info`: the running server's garmin-reader version, git commit and
   garminconnect version, and whether it's stale (code on disk changed since
   it started).
 
-`kcal fetch` output is unchanged. Login is non-interactive, so run
-`kcal fetch` once in a terminal first to cache the session token.
+`garmin-reader fetch` output is unchanged. Login is non-interactive, so run
+`garmin-reader fetch` once in a terminal first to cache the session token.
 
 Claude Desktop / Claude Code config (stdio):
 
 ```json
 {
   "mcpServers": {
-    "kcal": {
-      "command": "path\\to\\kcal\\.venv\\Scripts\\kcal-mcp.exe"
+    "garmin-reader": {
+      "command": "path\\to\\garmin-reader\\.venv\\Scripts\\garmin-reader-mcp.exe"
     }
   }
 }
@@ -125,7 +125,7 @@ Claude Desktop / Claude Code config (stdio):
 
 ### Over HTTP
 
-`kcal-mcp --http` serves the same tools over Streamable HTTP at `/mcp`, for
+`garmin-reader-mcp --http` serves the same tools over Streamable HTTP at `/mcp`, for
 remote clients such as claude.ai and ChatGPT reaching it through a tunnel or
 on an always-on host (the [Dockerfile](Dockerfile) and
 [docs/deployment.md](docs/deployment.md)). See
@@ -146,11 +146,11 @@ user its token belongs to. When a Garmin session expires, the tools answer
 with a link to the same page.
 
 1. Start a tunnel, e.g. `cloudflared tunnel --url http://localhost:8000`.
-2. Start `kcal-mcp --http --public-url <tunnel URL> --allowed-emails you@example.com`.
+2. Start `garmin-reader-mcp --http --public-url <tunnel URL> --allowed-emails you@example.com`.
 3. Add `<tunnel URL>/mcp` as a connector. In claude.ai choose "Sign in now"
    and "Register automatically"; in ChatGPT choose OAuth.
 
-`kcal-mcp --revoke-all` signs every client out, even while the server runs,
+`garmin-reader-mcp --revoke-all` signs every client out, even while the server runs,
 and invalidates waiting sign-ins and unexchanged authorization codes.
 Removing an email from the allowlist signs that user out at the next start
 and deletes their stored Garmin session. A stored session must belong to
@@ -158,8 +158,20 @@ the user's Garmin profile before tools can read any health data.
 
 | Setting | Flag | Default |
 |---|---|---|
-| `KCAL_PUBLIC_URL` | `--public-url` | required, e.g. `https://abc.trycloudflare.com` |
-| `KCAL_ALLOWED_EMAILS` | `--allowed-emails` | required; Garmin login emails allowed to sign in, comma-separated |
-| `KCAL_PORT` | `--port` | `$PORT`, else `8000` |
-| `KCAL_HOST` | `--host` | `127.0.0.1` (`0.0.0.0` in a container) |
-| `KCAL_STATE_DIR` | | `~/.kcal` (`users/<profile>/` with each user's Garmin tokens; `mcp_auth.sqlite` with OAuth clients, hashed tokens and users) |
+| `GARMIN_READER_PUBLIC_URL` | `--public-url` | required, e.g. `https://abc.trycloudflare.com` |
+| `GARMIN_READER_ALLOWED_EMAILS` | `--allowed-emails` | required; Garmin login emails allowed to sign in, comma-separated |
+| `GARMIN_READER_PORT` | `--port` | `$PORT`, else `8000` |
+| `GARMIN_READER_HOST` | `--host` | `127.0.0.1` (`0.0.0.0` in a container) |
+| `GARMIN_READER_STATE_DIR` | | `~/.garmin-reader` (`users/<profile>/` with each user's Garmin tokens; `mcp_auth.sqlite` with OAuth clients, hashed tokens and users) |
+
+## Renamed from kcal
+
+Before 1.0.0 this project was called kcal. What it set up still works:
+
+- Each setting above is also read under its old name (`KCAL_PUBLIC_URL`
+  and so on) when the new one isn't set.
+- `~/.kcal` is still used while `~/.garmin-reader` doesn't exist. To
+  switch, stop the server and rename the folder.
+- The commands are now `garmin-reader` and `garmin-reader-mcp`: point MCP
+  client configs at `garmin-reader-mcp.exe`, then `pip uninstall kcal`.
+- The tool `get_kcal_server_info` is now `get_garmin_reader_info`.

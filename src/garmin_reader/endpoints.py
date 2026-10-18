@@ -21,7 +21,7 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
-from kcal.auth import GarminLoginError, is_refresh_unavailable
+from garmin_reader.auth import GarminLoginError, is_refresh_unavailable
 
 # Compact per-day summaries; the intraday series (heart_rates, stress_data,
 # steps_data, ...) are large and must be requested explicitly.

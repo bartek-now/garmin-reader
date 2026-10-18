@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-Deploys kcal to a Google Cloud e2-micro VM (free tier), or updates it.
+Deploys garmin-reader to a Google Cloud e2-micro VM (free tier), or updates it.
 
 .DESCRIPTION
 Creates whatever is missing (static IP, firewall rules, VM), then runs
 setup-vm.sh on the VM, which builds the code from GitHub and restarts.
 Run it again to deploy a newer commit, or after changing who may sign
-in. Use a project dedicated to kcal: this removes the default network's
+in. Use a project dedicated to garmin-reader: this removes the default network's
 rules that open SSH, RDP and ping to the internet. See
 docs/deployment.md, "Google Cloud VM".
 
@@ -138,18 +138,18 @@ if (-not (Test-GCloud compute instances describe $Vm --zone $Zone)) {
 }
 
 # Upload setup-vm.sh with Unix line endings, whatever the checkout has.
-$Setup = Join-Path ([IO.Path]::GetTempPath()) 'kcal-setup-vm.sh'
+$Setup = Join-Path ([IO.Path]::GetTempPath()) 'garmin-reader-setup-vm.sh'
 $Text = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'setup-vm.sh')) -replace "`r`n", "`n"
 [IO.File]::WriteAllText($Setup, $Text, (New-Object Text.UTF8Encoding $false))
 try {
-    Invoke-GCloud compute scp @SshArgs $Setup "${Vm}:/tmp/kcal-setup-vm.sh"
+    Invoke-GCloud compute scp @SshArgs $Setup "${Vm}:/tmp/garmin-reader-setup-vm.sh"
 } finally {
     Remove-Item $Setup -ErrorAction SilentlyContinue
 }
 # The arguments were validated above, so they need no quoting on the VM.
 # SSH through IAP occasionally drops at the end; setup-vm.sh is safe to
 # run again, so retry once.
-$SetupCommand = "bash /tmp/kcal-setup-vm.sh $Domain $Emails $Ref"
+$SetupCommand = "bash /tmp/garmin-reader-setup-vm.sh $Domain $Emails $Ref"
 try {
     Invoke-GCloud compute ssh $Vm @SshArgs --command $SetupCommand
 } catch {

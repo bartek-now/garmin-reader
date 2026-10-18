@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from kcal.auth import login
-from kcal.client import fetch_activities, fetch_day_summary, fetch_weigh_ins
-from kcal.dedupe import build_day_stats
-from kcal.models import DayStats
+from garmin_reader.auth import login
+from garmin_reader.client import fetch_activities, fetch_day_summary, fetch_weigh_ins
+from garmin_reader.dedupe import build_day_stats
+from garmin_reader.models import DayStats
 
 
 def _parse_date(value: str) -> date:

@@ -1,6 +1,6 @@
 # Deploying the HTTP MCP server
 
-How to run `kcal-mcp --http` on an always-on host instead of a PC behind a
+How to run `garmin-reader-mcp --http` on an always-on host instead of a PC behind a
 quick tunnel. Most of this applies to any host; [Google Cloud VM](#google-cloud-vm)
 is the ready-made setup for one.
 Background: [http-server-design.md](http-server-design.md).
@@ -24,13 +24,13 @@ The [Dockerfile](../Dockerfile) builds an image that runs as a non-root user,
 keeps all state in `/data` and listens on `0.0.0.0`:
 
 ```bash
-docker build -t kcal-mcp .
-docker run -d --name kcal-mcp --restart unless-stopped \
+docker build -t garmin-reader-mcp .
+docker run -d --name garmin-reader-mcp --restart unless-stopped \
   -p 8000:8000 \
-  -v kcal-data:/data \
-  -e KCAL_PUBLIC_URL=https://kcal.example.com \
-  -e KCAL_ALLOWED_EMAILS=you@example.com,friend@example.com \
-  kcal-mcp
+  -v garmin-reader-data:/data \
+  -e GARMIN_READER_PUBLIC_URL=https://garmin-reader.example.com \
+  -e GARMIN_READER_ALLOWED_EMAILS=you@example.com,friend@example.com \
+  garmin-reader-mcp
 ```
 
 Put the HTTPS front end (the platform's, a reverse proxy such as Caddy, or a
@@ -39,20 +39,24 @@ calls `/healthz`, which needs no sign-in and reports only that the server is
 up. It doesn't check Garmin, so a Garmin outage doesn't get the server
 restarted.
 
+A container set up before the rename (from kcal) keeps working: the old
+`KCAL_` settings are still read, and its volume (`kcal-data`) holds
+everything, so mount that one into the new image.
+
 ## Settings
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `KCAL_PUBLIC_URL` | required | The HTTPS URL clients use, without a path. |
-| `KCAL_ALLOWED_EMAILS` | required | Garmin login emails allowed to sign in, comma-separated. Each user sees only their own data. |
-| `KCAL_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Address to listen on. |
-| `KCAL_PORT` | `$PORT`, else `8000` | Port to listen on. Platforms such as Cloud Run set `PORT`; don't set `KCAL_PORT` there. |
-| `KCAL_STATE_DIR` | `~/.kcal` (`/data` in the image) | Where `users/` (each user's Garmin session) and `mcp_auth.sqlite` live. |
+| `GARMIN_READER_PUBLIC_URL` | required | The HTTPS URL clients use, without a path. |
+| `GARMIN_READER_ALLOWED_EMAILS` | required | Garmin login emails allowed to sign in, comma-separated. Each user sees only their own data. |
+| `GARMIN_READER_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Address to listen on. |
+| `GARMIN_READER_PORT` | `$PORT`, else `8000` | Port to listen on. Platforms such as Cloud Run set `PORT`; don't set `GARMIN_READER_PORT` there. |
+| `GARMIN_READER_STATE_DIR` | `~/.garmin-reader` (`/data` in the image) | Where `users/` (each user's Garmin session) and `mcp_auth.sqlite` live. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Read by uvicorn: the front end's address, so logs show the real client address from `X-Forwarded-For` instead of the front end's. Only affects logs. Never `*` if the server can be reached without the front end. |
 
 ## Signing in to Garmin on the host
 
-Each user signs in to Garmin once at `<KCAL_PUBLIC_URL>/login` (with the
+Each user signs in to Garmin once at `<GARMIN_READER_PUBLIC_URL>/login` (with the
 verification code if asked), usually when first adding the connector. The
 host then has its own Garmin session for them, stored under
 `users/<Garmin profile ID>/`. Do this rather than copying a PC's tokens: a
@@ -62,11 +66,11 @@ copy can stop working.
 Garmin's sign-in sits behind bot protection that can be stricter with
 data-centre addresses, so a sign-in from the host may be refused. Renewing an
 existing session usually still works. If it's refused: sign in on a PC with
-`kcal fetch`, copy the folder with `garmin_tokens.json` to the host and run
-`kcal-mcp --import-garmin-session <email> <folder>` there (see the Google
+`garmin-reader fetch`, copy the folder with `garmin_tokens.json` to the host and run
+`garmin-reader-mcp --import-garmin-session <email> <folder>` there (see the Google
 Cloud VM section for the exact commands). It stores the session as that
 user's, after checking with Garmin which account it is. From then on don't
-use that session on the PC (sign in again there if you need `kcal fetch`).
+use that session on the PC (sign in again there if you need `garmin-reader fetch`).
 
 ## Moving connected clients
 
@@ -80,9 +84,9 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
 
 - **Upgrades:** rebuild and restart. Everything in the volume survives;
   sign-ins in progress don't.
-- **Signing everyone out:** `docker exec kcal-mcp kcal-mcp --revoke-all`.
+- **Signing everyone out:** `docker exec garmin-reader-mcp garmin-reader-mcp --revoke-all`.
   This also invalidates sign-ins in progress and outstanding authorization codes.
-- **Adding or removing users:** change `KCAL_ALLOWED_EMAILS` and restart.
+- **Adding or removing users:** change `GARMIN_READER_ALLOWED_EMAILS` and restart.
   A new user adds the connector and signs in at `/login`. A removed user is
   signed out at the start, and their stored Garmin session is deleted.
   Upgrading from a single-owner version (`KCAL_GARMIN_OWNER`) signs every
@@ -100,18 +104,22 @@ certificates, renewed automatically):
 
 - `deploy.ps1` runs on your PC, in PowerShell. It creates what's missing in
   the Google Cloud project (a static IP `kcal-mcp-ip`, the firewall rules
-  below, and the VM `kcal-mcp`), then runs `setup-vm.sh` on the VM.
+  below, and the VM `kcal-mcp`), then runs `setup-vm.sh` on the VM. These
+  keep their names from before the rename: a static IP can't be renamed.
 - `setup-vm.sh` installs Docker, checks out the requested commit from GitHub
-  into `/opt/kcal`, writes the settings to `deploy/gcp/.env` there and
+  into `/opt/garmin-reader`, writes the settings to `deploy/gcp/.env` there and
   starts [compose.yaml](../deploy/gcp/compose.yaml): the server (port 8000,
-  reachable only by Caddy) and Caddy (ports 80 and 443).
+  reachable only by Caddy) and Caddy (ports 80 and 443). A VM set up
+  before the rename has the code in `/opt/kcal`; the first deployment
+  after it moves it. The Compose project is still called `kcal`, since
+  the volumes are named after it.
 
 The VM runs Debian 12 with a 30 GB standard disk and no service account (it
 needs no Google Cloud access). The free tier covers one e2-micro in
 `us-east1`, `us-central1` or `us-west1` and its disk. The static IP may be
 billed separately; check the project's billing.
 
-**Firewall.** Use a project dedicated to kcal: `deploy.ps1` removes the
+**Firewall.** Use a project dedicated to garmin-reader: `deploy.ps1` removes the
 default network's rules that open SSH, RDP and ping to the internet
 (`default-allow-ssh`, `default-allow-rdp`, `default-allow-icmp`), which
 would affect any other VM in the project. What stays open:
@@ -148,20 +156,20 @@ volumes survive. **Adding or removing a user:** edit `allowedEmails` in
 `settings.local.json` and run `deploy.ps1`.
 
 **On the VM** (`gcloud compute ssh kcal-mcp --zone us-east1-b --tunnel-through-iap`), from
-`/opt/kcal/deploy/gcp`:
+`/opt/garmin-reader/deploy/gcp`:
 
-- logs: `sudo docker compose logs -f kcal`;
-- signing everyone out: `sudo docker compose exec kcal kcal-mcp --revoke-all`;
+- logs: `sudo docker compose logs -f garmin-reader`;
+- signing everyone out: `sudo docker compose exec garmin-reader garmin-reader-mcp --revoke-all`;
 - if Garmin refuses a user's sign-in from the VM (see above), copy their
   `garmin_tokens.json` to the VM (`gcloud compute scp --tunnel-through-iap`),
   then import it as theirs:
 
   ```bash
-  sudo docker compose exec -u root kcal sh -c 'mkdir -p /tmp/import && chown kcal /tmp/import'
-  sudo docker compose cp garmin_tokens.json kcal:/tmp/import/
-  sudo docker compose exec -u root kcal chown kcal /tmp/import/garmin_tokens.json
-  sudo docker compose exec kcal kcal-mcp --import-garmin-session you@example.com /tmp/import
-  sudo docker compose exec -u root kcal rm -rf /tmp/import
+  sudo docker compose exec -u root garmin-reader sh -c 'mkdir -p /tmp/import && chown garmin-reader /tmp/import'
+  sudo docker compose cp garmin_tokens.json garmin-reader:/tmp/import/
+  sudo docker compose exec -u root garmin-reader chown garmin-reader /tmp/import/garmin_tokens.json
+  sudo docker compose exec garmin-reader garmin-reader-mcp --import-garmin-session you@example.com /tmp/import
+  sudo docker compose exec -u root garmin-reader rm -rf /tmp/import
   rm garmin_tokens.json
   ```
 

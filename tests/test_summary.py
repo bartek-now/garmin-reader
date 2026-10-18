@@ -1,4 +1,4 @@
-"""get_garmin_summary's data assembly (kcal.summary), with a fake Garmin."""
+"""get_garmin_summary's data assembly (garmin_reader.summary), with a fake Garmin."""
 
 import contextvars
 import threading
@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from kcal import summary
+from garmin_reader import summary
 
 D1, D2, D3 = date(2026, 10, 7), date(2026, 10, 8), date(2026, 10, 9)
 
@@ -344,7 +344,7 @@ def test_failing_day_is_reported_with_a_count(api):
 def test_login_problems_still_fail_the_whole_call(api, error):
     from garminconnect import GarminConnectAuthenticationError
 
-    from kcal.auth import GarminLoginError
+    from garmin_reader.auth import GarminLoginError
 
     exc = GarminLoginError("expired") if error == "login" else GarminConnectAuthenticationError("401")
 
@@ -382,7 +382,7 @@ def test_a_failed_day_stops_the_rest(api):
     ("get_lifestyle_logging_data", ["lifestyle"]),
 ])
 def test_refresh_outage_stops_each_summary_fetch_path(api, monkeypatch, method, groups):
-    from kcal.auth import GarminRefreshUnavailable
+    from garmin_reader.auth import GarminRefreshUnavailable
 
     cause = GarminRefreshUnavailable("refresh service unavailable")
     error = GarminConnectConnectionError("wrapped by Garmin")

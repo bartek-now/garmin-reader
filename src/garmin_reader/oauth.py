@@ -64,15 +64,15 @@ UNUSED_CLIENT_SECONDS = 24 * 60 * 60
 MAX_CLIENTS = 500
 
 
-class KcalAccessToken(AccessToken):
+class GarminReaderAccessToken(AccessToken):
     family: str  # one per authorization, kept across refreshes
 
 
-class KcalRefreshToken(RefreshToken):
+class GarminReaderRefreshToken(RefreshToken):
     family: str
 
 
-class KcalAuthorizationCode(AuthorizationCode):
+class GarminReaderAuthorizationCode(AuthorizationCode):
     generation: int
 
 
@@ -121,7 +121,7 @@ def _owner_only(path: Path, mode: int) -> None:
         pass
 
 
-class KcalOAuthProvider:
+class GarminReaderOAuthProvider:
     """Implements the SDK's OAuthAuthorizationServerProvider protocol."""
 
     def __init__(self, db_path: Path, public_url: str):
@@ -174,7 +174,7 @@ class KcalOAuthProvider:
                 """
             )
         self._pending: dict[str, PendingAuthorization] = {}
-        self._codes: dict[str, KcalAuthorizationCode] = {}
+        self._codes: dict[str, GarminReaderAuthorizationCode] = {}
         # Who may sign in; None until configured, which allows no one.
         self._allowed: frozenset[str] | None = None
 
@@ -366,7 +366,7 @@ class KcalOAuthProvider:
         now = time.time()
         self._codes = {k: c for k, c in self._codes.items() if c.expires_at > now}
         code = secrets.token_urlsafe(32)
-        self._codes[code] = KcalAuthorizationCode(
+        self._codes[code] = GarminReaderAuthorizationCode(
             generation=p.generation,
             code=code,
             scopes=p.params.scopes or [SCOPE],
@@ -413,7 +413,7 @@ class KcalOAuthProvider:
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
-    ) -> KcalRefreshToken | None:
+    ) -> GarminReaderRefreshToken | None:
         row = self._load(refresh_token, ("refresh", "used_refresh"))
         if row is None or row["client_id"] != client.client_id:
             return None
@@ -422,12 +422,12 @@ class KcalOAuthProvider:
             # replaying it. Either way, end the whole chain (OAuth 2.1, 4.3.1).
             self._delete_family(row["family"])
             return None
-        return KcalRefreshToken(token=refresh_token, **row)
+        return GarminReaderRefreshToken(token=refresh_token, **row)
 
     async def exchange_refresh_token(
         self,
         client: OAuthClientInformationFull,
-        refresh_token: KcalRefreshToken,
+        refresh_token: GarminReaderRefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
         # Rotate: the old pair stops working, the old refresh token is kept
@@ -437,14 +437,14 @@ class KcalOAuthProvider:
             refresh_token=refresh_token,
         )
 
-    async def load_access_token(self, token: str) -> KcalAccessToken | None:
+    async def load_access_token(self, token: str) -> GarminReaderAccessToken | None:
         row = self._load(token, ("access",))
         if row is None:
             return None
         del row["kind"]
-        return KcalAccessToken(token=token, **row)
+        return GarminReaderAccessToken(token=token, **row)
 
-    async def revoke_token(self, token: KcalAccessToken | KcalRefreshToken) -> None:
+    async def revoke_token(self, token: GarminReaderAccessToken | GarminReaderRefreshToken) -> None:
         self._delete_family(token.family)
 
     def revoke_all(self) -> int:
@@ -464,7 +464,7 @@ class KcalOAuthProvider:
 
     def _issue(
         self, client_id: str, scopes: list[str], subject: str | None, family: str | None = None,
-        *, generation: int | None = None, refresh_token: KcalRefreshToken | None = None,
+        *, generation: int | None = None, refresh_token: GarminReaderRefreshToken | None = None,
     ) -> OAuthToken:
         now = int(time.time())
         family = family or secrets.token_urlsafe(16)

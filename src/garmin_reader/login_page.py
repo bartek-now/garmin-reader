@@ -41,9 +41,9 @@ from garminconnect import (
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
-from kcal.auth import garmin_profile_id
-from kcal.oauth import KcalOAuthProvider
-from kcal.settings import normalize_email
+from garmin_reader.auth import garmin_profile_id
+from garmin_reader.oauth import GarminReaderOAuthProvider
+from garmin_reader.settings import normalize_email
 
 # Failed attempts (wrong password or MFA code, Garmin refusing) allowed per
 # window, per email: each email is one Garmin account Garmin could lock.
@@ -55,7 +55,7 @@ FAILURE_WINDOW_SECONDS = 60 * 60
 MFA_SECONDS = 5 * 60
 MAX_MFA_FLOWS = 20
 
-CSRF_COOKIE = "kcal_csrf"
+CSRF_COOKIE = "garmin_reader_csrf"
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "X-Frame-Options": "DENY",
@@ -213,7 +213,7 @@ class _Submission:
 class LoginPage:
     def __init__(
         self,
-        oauth: KcalOAuthProvider,
+        oauth: GarminReaderOAuthProvider,
         token_store: Callable[[int], Path],
         garmin: GarminGateway | None = None,
         secure_cookie: bool = True,
@@ -295,7 +295,7 @@ class LoginPage:
             response = await run()
             # Duplicates already waiting get this answer whatever it is.
             entry.response = self._snapshot(response)
-            if response.status_code == 429 or not getattr(response, "kcal_replayable", True):
+            if response.status_code == 429 or not getattr(response, "garmin_reader_replayable", True):
                 # Paused, or Garmin failed temporarily: later submissions of
                 # the same form must really be tried, not get this answer.
                 self._forget(key, entry)
@@ -391,7 +391,7 @@ class LoginPage:
                         if isinstance(err, (GarminConnectConnectionError,
                                             GarminConnectTooManyRequestsError)):
                             # Temporary: the same code may well work later.
-                            retry.kcal_replayable = False
+                            retry.garmin_reader_replayable = False
                         return retry
                     # Another submission may have removed it meanwhile (expiry).
                     self._mfa.pop(flow_id, None)
@@ -412,9 +412,9 @@ class LoginPage:
             await anyio.to_thread.run_sync(self.garmin.save, api, self.token_store(profile_id))
         except Exception as err:
             reason = (
-                "Garmin didn't issue a session kcal can keep"
+                "Garmin didn't issue a session garmin-reader can keep"
                 if isinstance(err, IncompleteSession)
-                else "kcal couldn't save the Garmin session"
+                else "garmin-reader couldn't save the Garmin session"
             )
             return self._form(
                 request, request_id, error=f"Signed in, but {reason}. Please try again."
@@ -541,7 +541,7 @@ class LoginPage:
                 f"<b>{html.escape(back_to)}</b>. If you didn't start this, deny it.</p>"
             )
         else:
-            intro = "<p>Sign in to Garmin to refresh kcal's Garmin session.</p>"
+            intro = "<p>Sign in to Garmin to refresh garmin-reader's Garmin session.</p>"
         csrf = request.cookies.get(CSRF_COOKIE) or secrets.token_urlsafe(32)
         hidden = self._hidden(csrf, req=request_id or "")
         attempt = self._hidden(csrf, attempt=secrets.token_urlsafe(16))[len(self._hidden(csrf)):]
@@ -590,7 +590,7 @@ class LoginPage:
         page = (
             "<!doctype html><html lang=en><head><meta charset=utf-8>"
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f"<title>kcal: {html.escape(title)}</title><style>{_CSS}</style></head>"
+            f"<title>garmin-reader: {html.escape(title)}</title><style>{_CSS}</style></head>"
             f"<body><main><h1>{html.escape(title)}</h1>{body}</main></body></html>"
         )
         return self._secure(HTMLResponse(page, status_code=status))

@@ -3,9 +3,9 @@ from datetime import date
 
 import pytest
 
-from kcal import cli
-from kcal.cli import _render_csv
-from kcal.models import DayStats, Workout
+from garmin_reader import cli
+from garmin_reader.cli import _render_csv
+from garmin_reader.models import DayStats, Workout
 
 
 ONE_DAY = [

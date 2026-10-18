@@ -8,7 +8,7 @@ unauthenticated mode. Next: connecting the real clients (step 5). See
 
 ## Goal
 
-Let claude.ai (web and mobile) and ChatGPT use the kcal MCP tools, not just
+Let claude.ai (web and mobile) and ChatGPT use the garmin-reader MCP tools, not just
 local clients over stdio, for a few allowed people, each of whom sees only
 their own Garmin data.
 
@@ -19,7 +19,7 @@ their own Garmin data.
 | Transport | Streamable HTTP without MCP sessions, behind a flag. stdio stays the default. |
 | Hosting | A PC behind a Cloudflare **quick tunnel** at first; code written so a move to an always-on host is a config change (now a Google Cloud VM, see deployment.md). |
 | MCP auth | OAuth 2.1 via the MCP SDK's built-in authorization server (`mcp.server.auth`), with dynamic client registration. |
-| Who may log in | Whoever completes a **Garmin login (with MFA) with an email on the allowlist** (`KCAL_ALLOWED_EMAILS`) on our `/login` page (reached via `/authorize`). Garmin accepting the password proves they own that account. No separate identity provider yet. |
+| Who may log in | Whoever completes a **Garmin login (with MFA) with an email on the allowlist** (`GARMIN_READER_ALLOWED_EMAILS`) on our `/login` page (reached via `/authorize`). Garmin accepting the password proves they own that account. No separate identity provider yet. |
 | Several users | Each user's OAuth tokens carry their email; each tool call uses only the Garmin session stored for that user, never another's or a shared one. |
 | Later | A Google (or GitHub) sign-in step in front of the Garmin form, once the hostname is stable. Optionally, URL-mode elicitation as a nicer way to open `/login`. |
 | Garmin expiry | Tool error that tells the user exactly what to do, with a link to `/login`; no reconnecting the connector. This is the intended design, not a stopgap. |
@@ -27,7 +27,7 @@ their own Garmin data.
 
 ## 1. Transport
 
-- `kcal-mcp` keeps running over stdio. `kcal-mcp --http` serves Streamable
+- `garmin-reader-mcp` keeps running over stdio. `garmin-reader-mcp --http` serves Streamable
   HTTP at `/mcp` on `127.0.0.1:<port>`.
 - No MCP sessions: each request stands alone, with no `Mcp-Session-Id` or
   per-session state in memory. Server restarts (reboots, code reloads) and a
@@ -45,7 +45,7 @@ their own Garmin data.
 - **DNS-rebinding protection:** FastMCP turns it on for `127.0.0.1` and allows
   only `localhost` Host headers, which would reject requests arriving through
   the tunnel. Pass `TransportSecuritySettings` that also allow the public
-  hostname from `KCAL_PUBLIC_URL`.
+  hostname from `GARMIN_READER_PUBLIC_URL`.
 - The tools themselves don't change, except for the remote exposure filter
   (section 5).
 
@@ -92,7 +92,7 @@ Connecting a client:
      succeeded, any submission for it gets that success. The form links to
      "Start over".
 5. On success: look up the session's Garmin profile ID, save the tokens to
-   that profile's own store (`KCAL_STATE_DIR/users/<profile ID>/`) and
+   that profile's own store (`GARMIN_READER_STATE_DIR/users/<profile ID>/`) and
    record the email's profile in the database.
 6. Drop that user's cached Garmin session, issue an authorization code for
    the email and redirect to the client's `redirect_uri`. The client
@@ -126,7 +126,7 @@ put in front later without restructuring it.
 | Refresh token | 30 days, rotated on use | Client refreshes silently; a full re-login is needed only after 30 days of no use or a revoke. A rotated token that comes back again (stolen or replayed) ends the whole chain of tokens from that login. |
 | Authorization code | 5 minutes, single use | |
 
-All stored in one SQLite file (`KCAL_STATE_DIR/mcp_auth.sqlite`): registered
+All stored in one SQLite file (`GARMIN_READER_STATE_DIR/mcp_auth.sqlite`): registered
 clients, refresh tokens, access tokens (hashed), and each user's Garmin
 profile. Moving hosts = copying this file and `users/`; skipping the copy
 costs one reconnect per client.
@@ -167,11 +167,11 @@ tool can read health data, and checked again whenever it's reloaded.
 | Garmin unreachable or rate-limiting | Normal tool result, `isError: true` | "Try again in a few minutes", with no login link: signing in again wouldn't help and would spend sign-in attempts. |
 
 The Garmin-expiry error is the user's only cue, so it must be actionable on
-its own, read by a model that knows nothing about kcal:
+its own, read by a model that knows nothing about garmin-reader:
 
 - say what happened (the Garmin session expired; nothing is wrong with the
   connector);
-- give the full `/login` URL, built from `KCAL_PUBLIC_URL`;
+- give the full `/login` URL, built from `GARMIN_READER_PUBLIC_URL`;
 - say what to do there (sign in to Garmin, enter the MFA code if asked);
 - say what to do after (ask again; no need to reconnect the connector);
 - tell the model to show the link to the user rather than retry.
@@ -182,7 +182,7 @@ Opening `/login` directly needs no extra gate, because passing it requires
 logging in to Garmin with an allowed email; it refreshes that user's
 session only.
 
-`_no_mfa()`'s "run `kcal fetch`" message stays for stdio; in HTTP mode the
+`_no_mfa()`'s "run `garmin-reader fetch`" message stays for stdio; in HTTP mode the
 error points to `/login` instead.
 
 ## 4. Settings
@@ -191,16 +191,16 @@ All from environment variables (CLI flags may override), no hard-coded paths:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `KCAL_PUBLIC_URL` | — (required with `--http`) | Public base URL, e.g. the quick-tunnel URL. Issuer and resource URL derive from it. |
-| `KCAL_PORT` | `8000` | Local port. |
-| `KCAL_ALLOWED_EMAILS` | — (required with `--http`) | Garmin login emails allowed to log in, comma-separated. |
-| `KCAL_STATE_DIR` | `~/.kcal` | Holds `users/` (each HTTP user's Garmin session), `garmin_tokens/` (the CLI's and stdio's) and `mcp_auth.sqlite`. |
+| `GARMIN_READER_PUBLIC_URL` | — (required with `--http`) | Public base URL, e.g. the quick-tunnel URL. Issuer and resource URL derive from it. |
+| `GARMIN_READER_PORT` | `8000` | Local port. |
+| `GARMIN_READER_ALLOWED_EMAILS` | — (required with `--http`) | Garmin login emails allowed to log in, comma-separated. |
+| `GARMIN_READER_STATE_DIR` | `~/.garmin-reader` | Holds `users/` (each HTTP user's Garmin session), `garmin_tokens/` (the CLI's and stdio's) and `mcp_auth.sqlite`. |
 
 The server refuses to start in HTTP mode without the required settings, or
 with the single-owner `KCAL_GARMIN_OWNER` still set.
 
 Quick tunnel: `cloudflared tunnel --url http://localhost:8000` prints a new
-`*.trycloudflare.com` URL on every start. Set `KCAL_PUBLIC_URL` to it, start
+`*.trycloudflare.com` URL on every start. Set `GARMIN_READER_PUBLIC_URL` to it, start
 the server, and re-add the connector in each client (the old registration is
 tied to the old URL). A launcher that starts `cloudflared`, reads the URL and
 starts the server is a possible convenience later.
@@ -300,11 +300,11 @@ refused before any code runs.
 - Logs record tool name, arguments and outcome, never result payloads,
   passwords, MFA codes or tokens.
 - Garmin tokens and `mcp_auth.sqlite` on disk are what protect the data;
-  `KCAL_STATE_DIR` should only be readable by the account running the
+  `GARMIN_READER_STATE_DIR` should only be readable by the account running the
   server. Whoever runs the server can read every user's data.
 - One Garmin session per profile, each in its own store and cache entry;
   a user's re-login replaces only theirs, under that profile's lock.
-- Revoking all access: `kcal-mcp --revoke-all` signs every client out,
+- Revoking all access: `garmin-reader-mcp --revoke-all` signs every client out,
   even while the server runs (clients stay registered and just log in
   again). Deleting `mcp_auth.sqlite` and restarting also forgets the
   registrations.
@@ -312,7 +312,7 @@ refused before any code runs.
   can make the server keep is bounded: at most 100 waiting authorizations
   (oldest dropped), clients that never got a token are forgotten after a
   day, and registration stops at 500 clients.
-- `KCAL_STATE_DIR` is created owner-only (0700) and `mcp_auth.sqlite` is
+- `GARMIN_READER_STATE_DIR` is created owner-only (0700) and `mcp_auth.sqlite` is
   0600 where the OS supports it (on Windows the user profile's ACLs apply).
 - The OAuth scope is `garmin:read`. Registration is open to any client, as
   the MCP spec expects; what protects the data is that tokens are only
@@ -322,7 +322,7 @@ refused before any code runs.
 
 ## 7. Moving to an always-on host later
 
-Done so far (independent of the host): `KCAL_HOST` and the `PORT` fallback,
+Done so far (independent of the host): `GARMIN_READER_HOST` and the `PORT` fallback,
 a Dockerfile, a `/healthz` route, and [deployment.md](deployment.md), which
 covers what any host must provide, settings, Garmin sign-in on the host and
 moving state. For a Google Cloud e2-micro VM with Caddy in front,

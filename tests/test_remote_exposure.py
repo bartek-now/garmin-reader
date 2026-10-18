@@ -7,8 +7,8 @@ import pytest
 from garminconnect import Garmin
 from mcp.server.fastmcp.exceptions import ToolError
 
-from kcal import endpoints, mcp_server
-from kcal.settings import HttpSettings
+from garmin_reader import endpoints, mcp_server
+from garmin_reader.settings import HttpSettings
 
 GETTERS = {name.removeprefix("get_") for name in endpoints._getters()}
 DISALLOWED = sorted(GETTERS - endpoints.REMOTE_ALLOWED)

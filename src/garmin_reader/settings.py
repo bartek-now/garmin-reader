@@ -15,10 +15,22 @@ DEFAULT_HOST = "127.0.0.1"
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
+def setting(name: str, env: Mapping[str, str] = os.environ) -> str | None:
+    """GARMIN_READER_<name>, else KCAL_<name>, as it was called before the
+    project was renamed from kcal.
+    """
+    return env.get(f"GARMIN_READER_{name}") or env.get(f"KCAL_{name}")
+
+
 def state_dir(env: Mapping[str, str] = os.environ) -> Path:
-    """Where kcal keeps Garmin tokens (and, in HTTP mode, auth state)."""
-    value = env.get("KCAL_STATE_DIR")
-    return Path(value).expanduser() if value else Path.home() / ".kcal"
+    """Where garmin-reader keeps Garmin tokens (and, in HTTP mode, auth
+    state): GARMIN_READER_STATE_DIR, else ~/.garmin-reader, or ~/.kcal if
+    only that exists (from before the rename).
+    """
+    if value := setting("STATE_DIR", env):
+        return Path(value).expanduser()
+    new, old = Path.home() / ".garmin-reader", Path.home() / ".kcal"
+    return old if old.is_dir() and not new.exists() else new
 
 
 def garmin_token_store(env: Mapping[str, str] = os.environ) -> Path:
@@ -68,30 +80,31 @@ class HttpSettings:
         allowed_emails: str | None = None,
         host: str | None = None,
     ) -> HttpSettings:
-        """Explicit arguments (from CLI flags) win over KCAL_PUBLIC_URL,
-        KCAL_PORT (or PORT, which hosting platforms such as Cloud Run set),
-        KCAL_HOST and KCAL_ALLOWED_EMAILS. Raises ValueError naming the
-        setting that's wrong.
+        """Explicit arguments (from CLI flags) win over
+        GARMIN_READER_PUBLIC_URL, GARMIN_READER_PORT (or PORT, which hosting
+        platforms such as Cloud Run set), GARMIN_READER_HOST and
+        GARMIN_READER_ALLOWED_EMAILS, each with its old KCAL_ name as a
+        fallback. Raises ValueError naming the setting that's wrong.
         """
         if env.get("KCAL_GARMIN_OWNER"):
             raise ValueError(
                 "KCAL_GARMIN_OWNER is no longer used: list the Garmin emails allowed "
-                "to sign in in KCAL_ALLOWED_EMAILS instead"
+                "to sign in in GARMIN_READER_ALLOWED_EMAILS instead"
             )
-        url = public_url or env.get("KCAL_PUBLIC_URL")
+        url = public_url or setting("PUBLIC_URL", env)
         if not url:
             raise ValueError(
-                "HTTP mode needs the server's public URL: set KCAL_PUBLIC_URL "
+                "HTTP mode needs the server's public URL: set GARMIN_READER_PUBLIC_URL "
                 "or pass --public-url, e.g. https://abc.trycloudflare.com"
             )
         return cls(
             public_url=_check_url(url),
             port=_check_port(
-                port if port is not None else env.get("KCAL_PORT") or env.get("PORT")
+                port if port is not None else setting("PORT", env) or env.get("PORT")
             ),
-            host=_check_host(host or env.get("KCAL_HOST") or DEFAULT_HOST),
+            host=_check_host(host or setting("HOST", env) or DEFAULT_HOST),
             allowed_emails=parse_allowed_emails(
-                allowed_emails if allowed_emails is not None else env.get("KCAL_ALLOWED_EMAILS")
+                allowed_emails if allowed_emails is not None else setting("ALLOWED_EMAILS", env)
             ),
         )
 
@@ -100,19 +113,19 @@ def _check_url(url: str) -> str:
     parts = urlsplit(url.strip())
     # First, so no message below echoes credentials into the log.
     if "@" in parts.netloc:
-        raise ValueError("KCAL_PUBLIC_URL must not contain a user name or password")
+        raise ValueError("GARMIN_READER_PUBLIC_URL must not contain a user name or password")
     local = parts.hostname in _LOCAL_HOSTS
     if parts.scheme != "https" and not (parts.scheme == "http" and local):
         raise ValueError(
-            f"KCAL_PUBLIC_URL must be https:// (http:// only for localhost): {url!r}"
+            f"GARMIN_READER_PUBLIC_URL must be https:// (http:// only for localhost): {url!r}"
         )
     try:
         parts.port  # raises for a non-numeric or out-of-range port
     except ValueError:
-        raise ValueError(f"KCAL_PUBLIC_URL has an invalid port: {url!r}") from None
+        raise ValueError(f"GARMIN_READER_PUBLIC_URL has an invalid port: {url!r}") from None
     if not parts.hostname or parts.path not in ("", "/") or parts.query or parts.fragment:
         raise ValueError(
-            f"KCAL_PUBLIC_URL must be just scheme and host, e.g. "
+            f"GARMIN_READER_PUBLIC_URL must be just scheme and host, e.g. "
             f"https://abc.trycloudflare.com: {url!r}"
         )
     # Hosts are case-insensitive, but Host/Origin and the OAuth resource are
@@ -131,7 +144,7 @@ def _check_host(value: str) -> str:
         return str(ipaddress.ip_address(value.strip()))
     except ValueError:
         raise ValueError(
-            f"KCAL_HOST must be an IP address to listen on, e.g. 127.0.0.1 or "
+            f"GARMIN_READER_HOST must be an IP address to listen on, e.g. 127.0.0.1 or "
             f"0.0.0.0: {value!r}"
         ) from None
 
@@ -140,12 +153,12 @@ _EMAIL = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
 
 
 def parse_allowed_emails(value: str | None) -> frozenset[str]:
-    """KCAL_ALLOWED_EMAILS: Garmin login emails, separated by commas or
+    """GARMIN_READER_ALLOWED_EMAILS: Garmin login emails, separated by commas or
     whitespace. Raises ValueError for anything that isn't an email.
     """
     emails = [normalize_email(e) for e in re.split(r"[,\s]+", value or "") if e.strip()]
     if bad := [e for e in emails if not _EMAIL.fullmatch(e)]:
-        raise ValueError(f"KCAL_ALLOWED_EMAILS has entries that aren't emails: {bad}")
+        raise ValueError(f"GARMIN_READER_ALLOWED_EMAILS has entries that aren't emails: {bad}")
     return frozenset(emails)
 
 
@@ -155,7 +168,7 @@ def _check_port(value: int | str | None) -> int:
     try:
         port = int(value)
     except ValueError:
-        raise ValueError(f"KCAL_PORT must be a number: {value!r}") from None
+        raise ValueError(f"GARMIN_READER_PORT must be a number: {value!r}") from None
     if not 1 <= port <= 65535:
-        raise ValueError(f"KCAL_PORT must be between 1 and 65535: {port}")
+        raise ValueError(f"GARMIN_READER_PORT must be between 1 and 65535: {port}")
     return port

@@ -7,12 +7,12 @@ from contextlib import contextmanager
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 
-from kcal.oauth import SCOPE, KcalAccessToken
+from garmin_reader.oauth import SCOPE, GarminReaderAccessToken
 
 
 @contextmanager
 def as_user(email: str):
-    token = KcalAccessToken(
+    token = GarminReaderAccessToken(
         token="test-token", client_id="test-client", scopes=[SCOPE], subject=email,
         family="test-family",
     )

@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from kcal.daily import fetch_days, resolve_days
+from garmin_reader.daily import fetch_days, resolve_days
 
 TODAY = date(2026, 7, 9)
 YESTERDAY = date(2026, 7, 8)
@@ -61,7 +61,7 @@ def test_range_at_max_days_ok():
 
 
 def test_huge_range_rejected_without_building_it(monkeypatch):
-    monkeypatch.setattr("kcal.daily.timedelta", None)  # building the list would fail
+    monkeypatch.setattr("garmin_reader.daily.timedelta", None)  # building the list would fail
     with pytest.raises(ValueError, match="at most 120"):
         resolve_days(None, "0001-01-01", "9999-12-31", today=TODAY, max_days=120)
 

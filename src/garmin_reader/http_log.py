@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 
-logger = logging.getLogger("kcal.http")
+logger = logging.getLogger("garmin_reader.http")
 
 # Request headers worth seeing next to a rejection. Deliberately an allowlist,
 # so Authorization and cookies can't end up in the log.

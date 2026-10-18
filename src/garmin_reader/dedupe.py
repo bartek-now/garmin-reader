@@ -9,7 +9,7 @@ movement and as part of a workout.
 
 from __future__ import annotations
 
-from kcal.models import DayStats, Workout
+from garmin_reader.models import DayStats, Workout
 
 
 def _latest_entry(weigh_in: dict) -> dict | None:
