@@ -97,9 +97,8 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
 certificates, renewed automatically):
 
 - `deploy.ps1` runs on your PC, in PowerShell. It creates what's missing in
-  the Google Cloud project (a static IP `kcal-mcp-ip`, the firewall rules
-  below, and the VM `kcal-mcp`), then runs `setup-vm.sh` on the VM. The
-  IP and VM keep their names from before the rename to garmin-reader.
+  the Google Cloud project (a static IP `garmin-mcp-ip`, the firewall rules
+  below, and the VM `garmin-mcp`), then runs `setup-vm.sh` on the VM.
 - `setup-vm.sh` installs Docker, checks out the requested commit from GitHub
   into `/opt/garmin-reader`, writes the settings to `deploy/gcp/.env` there and
   starts [compose.yaml](../deploy/gcp/compose.yaml): the server (port 8000,
@@ -147,7 +146,7 @@ branch, tag or commit; default `main`). It rebuilds and restarts; the
 volumes survive. **Adding or removing a user:** edit `allowedEmails` in
 `settings.local.json` and run `deploy.ps1`.
 
-**On the VM** (`gcloud compute ssh kcal-mcp --zone us-east1-b --tunnel-through-iap`), from
+**On the VM** (`gcloud compute ssh garmin-mcp --zone us-east1-b --tunnel-through-iap`), from
 `/opt/garmin-reader/deploy/gcp`:
 
 - logs: `sudo docker compose logs -f garmin-reader`;

@@ -66,8 +66,8 @@ foreach ($email in $AllowedEmails) {
 $Emails = ($AllowedEmails | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique) -join ','
 
 $Region = $Zone -replace '-[a-z]$', ''
-$Vm = 'kcal-mcp'
-$Address = 'kcal-mcp-ip'
+$Vm = 'garmin-mcp'
+$Address = 'garmin-mcp-ip'
 $Firewall = 'garmin-mcp-web'
 $SshFirewall = 'garmin-mcp-ssh-iap'
 # Google's Identity-Aware Proxy, which SSH goes through, after checking
