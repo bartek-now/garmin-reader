@@ -17,7 +17,6 @@ services:
     restart: unless-stopped
     environment:
       GARMIN_READER_PUBLIC_URL: https://${GARMIN_READER_DOMAIN:?set GARMIN_READER_DOMAIN in .env}
-      GARMIN_READER_ALLOWED_EMAILS: ${GARMIN_READER_ALLOWED_EMAILS:?set GARMIN_READER_ALLOWED_EMAILS in .env}
       # Caddy's address, so logs show the real client from X-Forwarded-For.
       FORWARDED_ALLOW_IPS: 172.30.0.10
     volumes:

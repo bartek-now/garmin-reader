@@ -351,7 +351,7 @@ def server(tmp_path, monkeypatch):
     # USER signed in to Garmin as profile 1; its stored session's revision.
     monkeypatch.setattr(provider, "garmin_session", lambda email: (1, "rev") if email == USER else None)
     server = mcp_server.build_server(
-        HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({USER})), provider
+        HttpSettings(public_url=PUBLIC), provider
     )
     with as_user(USER):
         yield server

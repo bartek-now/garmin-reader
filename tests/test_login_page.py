@@ -27,8 +27,7 @@ REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 OWNER = 12345  # EMAIL's Garmin profile
 EMAIL, PASSWORD = "me@example.com", "hunter2-secret"
 FRIEND, FRIEND_PROFILE = "friend@example.com", 777
-STRANGER = "other@example.com"  # a real Garmin account, but not on the list
-ALLOWED = frozenset({EMAIL, FRIEND, "mfa@example.com"})
+STRANGER = "other@example.com"  # a second Garmin account, never signed in before
 
 
 class FakeGarmin:
@@ -104,7 +103,7 @@ def provider(state):
 
 @pytest.fixture
 def server(garmin, provider):
-    return mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=ALLOWED), provider)
+    return mcp_server.build_server(HttpSettings(public_url=PUBLIC), provider)
 
 
 @pytest.fixture
@@ -123,7 +122,6 @@ def as_me(server, provider):
 
 def make_page(provider, garmin):
     """A login page set up as the server sets it up."""
-    provider.configure_allowed(ALLOWED)
     return login_page.LoginPage(provider, user_token_store, garmin)
 
 
@@ -404,14 +402,12 @@ def test_wrong_password(client, garmin, provider):
     assert provider.pending(req) is not None  # still waiting
 
 
-def test_email_not_on_the_list_is_refused_before_garmin(client, garmin, state, provider):
+def test_any_garmin_account_can_sign_in(client, garmin, state, provider):
     _, req = start_authorization(client)
     r = sign_in(client, req, email=STRANGER)
-    assert r.status_code == 200 and "isn't allowed to use this server" in r.text
-    assert garmin.calls == []  # the password never reached Garmin
-    assert not (state / "users").exists()
-    assert provider.garmin_profile(STRANGER) is None
-    assert provider.pending(req) is not None
+    assert r.status_code == 303  # back to the client with a code
+    assert provider.garmin_profile(STRANGER) == 999
+    assert (tokens_of(state, 999) / "saved.json").exists()
 
 
 def test_deny(client, provider):
@@ -473,11 +469,19 @@ def test_failures_are_capped_per_email(client, garmin):
     assert "Garmin session refreshed" in sign_in(client, email=FRIEND).text
 
 
-def test_emails_not_on_the_list_lock_nobody_out(client, garmin):
-    for _ in range(login_page.MAX_FAILURES + 1):
-        sign_in(client, email=STRANGER)
-    assert garmin.calls == []
-    assert "Garmin session refreshed" in sign_in(client).text
+def test_failures_of_many_emails_stay_bounded(provider, garmin, monkeypatch):
+    page = make_page(provider, garmin)
+    monkeypatch.setattr(login_page, "MAX_TRACKED_EMAILS", 3)
+    err = GarminConnectAuthenticationError("bad")
+    monkeypatch.setattr(login_page.time, "time", lambda: 1000.0)
+    page._record_failure(err, "old@example.com")
+    later = 1000.0 + login_page.FAILURE_WINDOW_SECONDS + 1
+    monkeypatch.setattr(login_page.time, "time", lambda: later)
+    for i in range(10):
+        page._record_failure(err, f"user{i}@example.com")
+    assert len(page._failures) == 3
+    assert "old@example.com" not in page._failures  # expired ones go first
+    assert "user9@example.com" in page._failures  # then the stalest
 
 
 def test_failures_expire_after_the_window(client, garmin, monkeypatch):
@@ -729,7 +733,7 @@ def test_unwritable_token_store_is_explained(client, garmin):
 def test_cookie_not_secure_on_plain_http(garmin, state):
     p = GarminReaderOAuthProvider(state / "a.sqlite", "http://localhost:8000")
     server = mcp_server.build_server(
-        HttpSettings(public_url="http://localhost:8000", allowed_emails=ALLOWED), p
+        HttpSettings(public_url="http://localhost:8000"), p
     )
     with TestClient(server.streamable_http_app(), base_url="http://localhost:8000") as c:
         r = c.get("/login")

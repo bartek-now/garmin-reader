@@ -7,8 +7,7 @@ hands the user's browser to the /login page, which calls
 `complete_authorization()` once the user has proved who they are.
 
 Several people can use one server. Each token carries its user (the Garmin
-login email, lowercase) as its subject, and only users on the allowlist get
-or keep tokens. The users table remembers each user's Garmin profile, whose
+login email, lowercase) as its subject. The users table remembers each user's Garmin profile, whose
 stored session serves their data.
 
 Clients, tokens and users live in one SQLite file, so they survive restarts
@@ -175,40 +174,10 @@ class GarminReaderOAuthProvider:
             )
         self._pending: dict[str, PendingAuthorization] = {}
         self._codes: dict[str, GarminReaderAuthorizationCode] = {}
-        # Who may sign in; None until configured, which allows no one.
-        self._allowed: frozenset[str] | None = None
-
-    def configure_allowed(self, emails: frozenset[str]) -> list[int]:
-        """Allow these users (lowercase emails) and nobody else. Tokens and
-        stored profiles of anyone else are deleted, including tokens from
-        before multiple users (whose subject was a Garmin profile ID).
-        Returns the Garmin profile IDs no allowed user has any more, whose
-        stored sessions the caller deletes.
-        """
-        allowed = frozenset(emails)
-        marks = ",".join("?" * len(allowed))
-        # Explicit transactions coordinate with the revocation CLI's separate
-        # connection. sqlite's context manager commits or rolls back without
-        # rewriting exceptions (the SDK's TokenError is a frozen dataclass).
+        # Tokens from before multiple users carried no email (or, for a
+        # single owner, their Garmin profile ID): drop them.
         with self._lock, self._db:
-            self._db.execute("BEGIN IMMEDIATE")
-            self._db.execute(
-                f"DELETE FROM tokens WHERE subject IS NULL OR subject NOT IN ({marks})",
-                tuple(allowed),
-            )
-            removed = {
-                profile for (profile,) in self._db.execute(
-                    f"SELECT profile_id FROM users WHERE email NOT IN ({marks})", tuple(allowed)
-                )
-            }
-            self._db.execute(f"DELETE FROM users WHERE email NOT IN ({marks})", tuple(allowed))
-            kept = {profile for (profile,) in self._db.execute("SELECT profile_id FROM users")}
-            self._db.execute("UPDATE auth_state SET owner = NULL WHERE id = 1")
-        self._allowed = allowed
-        return sorted(removed - kept)
-
-    def is_allowed(self, email: str) -> bool:
-        return self._allowed is not None and email in self._allowed
+            self._db.execute("DELETE FROM tokens WHERE subject IS NULL OR subject NOT LIKE '%@%'")
 
     def _generation(self) -> int:
         with self._lock:
@@ -225,8 +194,6 @@ class GarminReaderOAuthProvider:
         Returns the profile the email used before, if it's now nobody's, so
         the caller deletes its stored session.
         """
-        if not self.is_allowed(email):
-            raise KeyError("Not an allowed user")
         revision = secrets.token_hex(8)
         with self._lock, self._db:
             self._db.execute("BEGIN IMMEDIATE")
@@ -249,16 +216,14 @@ class GarminReaderOAuthProvider:
         return row[0] if not others else None
 
     def garmin_profiles(self) -> set[int]:
-        """Every Garmin profile an allowed user's data comes from."""
+        """Every Garmin profile a user's data comes from."""
         with self._lock:
             return {profile for (profile,) in self._db.execute("SELECT profile_id FROM users")}
 
     def garmin_session(self, email: str) -> tuple[int, str] | None:
         """(Garmin profile, revision of its stored session) serving `email`,
-        if they ever signed in to Garmin and are still allowed.
+        if they ever signed in to Garmin.
         """
-        if not self.is_allowed(email):
-            return None
         with self._lock:
             row = self._db.execute(
                 "SELECT profile_id, session FROM users WHERE email = ?", (email,)
@@ -358,8 +323,6 @@ class GarminReaderOAuthProvider:
         """The user logged in as `subject` (their email): issue a code and
         return the URL to send their browser back to the client. Single use.
         """
-        if not self.is_allowed(subject):
-            raise KeyError("Not an allowed user")
         p = self._take_pending(request_id)
         if p is None:
             raise KeyError("Unknown or expired authorization request")
@@ -478,8 +441,8 @@ class GarminReaderOAuthProvider:
             (current_generation,) = self._db.execute(
                 "SELECT generation FROM auth_state WHERE id = 1"
             ).fetchone()
-            if subject is None or not self.is_allowed(subject):
-                raise TokenError("invalid_grant", "Authorization belongs to a user who isn't allowed")
+            if subject is None:
+                raise TokenError("invalid_grant", "Authorization belongs to no user")
             if generation is not None and generation != current_generation:
                 raise TokenError("invalid_grant", "Authorization was revoked")
             if refresh_token is not None:
@@ -526,7 +489,7 @@ class GarminReaderOAuthProvider:
         if row is None:
             return None
         kind, family, client_id, scopes, expires_at, resource, subject = row
-        if subject is None or not self.is_allowed(subject):
+        if subject is None:
             return None
         return dict(
             kind=kind, family=family, client_id=client_id, scopes=json.loads(scopes),

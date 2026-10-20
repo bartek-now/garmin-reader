@@ -29,7 +29,6 @@ docker run -d --name garmin-reader-mcp --restart unless-stopped \
   -p 8000:8000 \
   -v garmin-reader-data:/data \
   -e GARMIN_READER_PUBLIC_URL=https://garmin-reader.example.com \
-  -e GARMIN_READER_ALLOWED_EMAILS=you@example.com,friend@example.com \
   garmin-reader-mcp
 ```
 
@@ -44,7 +43,6 @@ restarted.
 | Variable | Default | Meaning |
 |---|---|---|
 | `GARMIN_READER_PUBLIC_URL` | required | The HTTPS URL clients use, without a path. |
-| `GARMIN_READER_ALLOWED_EMAILS` | required | Garmin login emails allowed to sign in, comma-separated. Each user sees only their own data. |
 | `GARMIN_READER_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Address to listen on. |
 | `GARMIN_READER_PORT` | `$PORT`, else `8000` | Port to listen on. Platforms such as Cloud Run set `PORT`; don't set `GARMIN_READER_PORT` there. |
 | `GARMIN_READER_STATE_DIR` | `~/.garmin-reader` (`/data` in the image) | Where `users/` (each user's Garmin session) and `mcp_auth.sqlite` live. |
@@ -82,9 +80,10 @@ again (Claude: "Sign in now", "Register automatically"; ChatGPT: OAuth).
   sign-ins in progress don't.
 - **Signing everyone out:** `docker exec garmin-reader-mcp garmin-reader-mcp --revoke-all`.
   This also invalidates sign-ins in progress and outstanding authorization codes.
-- **Adding or removing users:** change `GARMIN_READER_ALLOWED_EMAILS` and restart.
-  A new user adds the connector and signs in at `/login`. A removed user is
-  signed out at the start, and their stored Garmin session is deleted.
+- **Users:** there is no list of permitted users. Anyone with a Garmin
+  account can add the connector and sign in at `/login`, and each user sees
+  only their own data. To cut someone off, delete their `users/<profile>/`
+  folder and run `--revoke-all`.
 - **Garmin session expired:** the tools reply with a link to `/login`; signing
   in there fixes it without reconnecting anything.
 - **Logs** go to stdout: every request's status line, plus the reason for any
@@ -130,9 +129,8 @@ would affect any other VM in the project. What stays open:
    `gcloud config set project <project>` (the project needs billing enabled,
    even for the free tier).
 2. Copy `deploy/gcp/settings.example.json` to `settings.local.json` and
-   fill in the hostname, project, zone and the Garmin login emails allowed
-   to sign in. It's gitignored: the repository is public. (Parameters such
-   as `-Domain` or `-AllowedEmails` override it.)
+   fill in the hostname, project and zone. It's gitignored: the repository
+   is public. (Parameters such as `-Domain` override it.)
 3. `.\deploy\gcp\deploy.ps1`.
 4. Add a DNS `A` record for the hostname pointing at the IP the script
    prints. If the DNS is on Cloudflare, leave the record unproxied (grey
@@ -142,8 +140,7 @@ would affect any other VM in the project. What stays open:
 
 **Updating:** push to GitHub, then run `deploy.ps1` again (`-Ref` picks a
 branch, tag or commit; default `main`). It rebuilds and restarts; the
-volumes survive. **Adding or removing a user:** edit `allowedEmails` in
-`settings.local.json` and run `deploy.ps1`.
+volumes survive.
 
 **On the VM** (`gcloud compute ssh garmin-mcp --zone us-east1-b --tunnel-through-iap`), from
 `/opt/garmin-reader/deploy/gcp`:

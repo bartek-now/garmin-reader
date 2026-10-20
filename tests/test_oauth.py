@@ -48,7 +48,7 @@ def provider(db):
 
 @pytest.fixture
 def client(provider):
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), provider)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC), provider)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         yield c
 
@@ -324,7 +324,7 @@ def test_clients_and_tokens_survive_a_restart(client, provider, db):
     client_id, tokens = connect(client, provider)
     provider.close()
     reopened = GarminReaderOAuthProvider(db, PUBLIC)
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), reopened)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC), reopened)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         assert mcp_call(c, tokens["access_token"]).status_code == 200
         assert refresh(c, client_id, tokens["refresh_token"]).status_code == 200
@@ -457,8 +457,6 @@ def test_deny_ignores_expired_request(client, provider, monkeypatch):
 
 def test_oauth_needs_http_settings(provider):
     with pytest.raises(ValueError, match="needs HTTP settings"):
-        mcp_server.build_server(HttpSettings(public_url=PUBLIC), provider)
-    with pytest.raises(ValueError, match="needs HTTP settings"):
         mcp_server.build_server(oauth=provider)
 
 
@@ -486,49 +484,10 @@ def test_revoke_all_command_without_database(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "mcp_auth.sqlite").exists()
 
 
-def test_removed_user_loses_tokens_and_profile(client, provider, db):
-    client_id, mine = connect(client, provider)
-    _, theirs = connect(client, provider, user=OTHER)
-    provider.set_garmin_profile(USER, 1)
-    provider.set_garmin_profile(OTHER, 2)
-    provider.close()
-    restarted = GarminReaderOAuthProvider(db, PUBLIC)
-    try:
-        assert restarted.configure_allowed(frozenset({OTHER})) == [1]
-        server = mcp_server.build_server(
-            HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({OTHER})), restarted
-        )
-        with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
-            assert mcp_call(c, mine["access_token"]).status_code == 401
-            assert refresh(c, client_id, mine["refresh_token"]).status_code == 400
-            assert mcp_call(c, theirs["access_token"]).status_code == 200
-        assert restarted.garmin_profile(USER) is None
-        assert restarted.garmin_profile(OTHER) == 2
-        with sqlite3.connect(db) as raw:
-            subjects = {s for (s,) in raw.execute("SELECT subject FROM tokens")}
-            assert subjects == {OTHER}
-            assert raw.execute("SELECT email FROM users").fetchall() == [(OTHER,)]
-        # Allowed again later: they connect again, from scratch.
-        assert restarted.configure_allowed(USERS) == []
-        assert restarted.garmin_profile(USER) is None
-    finally:
-        restarted.close()
 
 
-def test_token_of_a_user_who_isnt_allowed_never_loads(client, provider, db):
-    # Still in the database, e.g. restored from a backup: refused anyway.
-    client_id, tokens = connect(client, provider, user=OTHER)
-    with sqlite3.connect(db) as raw:
-        raw.execute("UPDATE tokens SET subject = 'stranger@example.com'")
-    assert mcp_call(client, tokens["access_token"]).status_code == 401
-    assert refresh(client, client_id, tokens["refresh_token"]).status_code == 400
 
 
-def test_profile_shared_by_an_allowed_user_is_not_orphaned(provider):
-    provider.configure_allowed(USERS)
-    provider.set_garmin_profile(USER, 7)
-    provider.set_garmin_profile(OTHER, 7)  # e.g. the account's login email changed
-    assert provider.configure_allowed(frozenset({OTHER})) == []
 
 
 def test_tokens_from_before_multiple_users_are_dropped(client, provider, db):
@@ -541,7 +500,7 @@ def test_tokens_from_before_multiple_users_are_dropped(client, provider, db):
         raw.execute("UPDATE auth_state SET owner = '12345'")
     migrated = GarminReaderOAuthProvider(db, PUBLIC)
     try:
-        server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), migrated)
+        server = mcp_server.build_server(HttpSettings(public_url=PUBLIC), migrated)
         with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
             assert mcp_call(c, mine["access_token"]).status_code == 200
             assert mcp_call(c, old["access_token"]).status_code == 401
@@ -553,25 +512,8 @@ def test_tokens_from_before_multiple_users_are_dropped(client, provider, db):
         migrated.close()
 
 
-def test_provider_rejects_users_who_arent_allowed(client, provider):
-    client_id = register(client)
-    req = query(start_authorize(client, client_id, pkce()[1]).headers["location"])["req"]
-    with pytest.raises(KeyError, match="Not an allowed user"):
-        provider.complete_authorization(req, "stranger@example.com")
-    with pytest.raises(KeyError, match="Not an allowed user"):
-        provider.set_garmin_profile("stranger@example.com", 3)
-    assert provider.garmin_profile("stranger@example.com") is None
-    # The request still waits for an allowed user.
-    assert provider.pending(req) is not None
 
 
-def test_unconfigured_provider_allows_nobody(db):
-    p = GarminReaderOAuthProvider(db, PUBLIC)
-    try:
-        assert not p.is_allowed(USER)
-        assert p.garmin_profile(USER) is None
-    finally:
-        p.close()
 
 
 def test_revoke_cli_invalidates_codes_and_waiting_logins(client, provider, db, monkeypatch):

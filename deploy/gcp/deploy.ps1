@@ -21,8 +21,6 @@ settings.example.json).
 #>
 param(
     [string]$Domain,
-    # Garmin login emails allowed to sign in.
-    [string[]]$AllowedEmails,
     # Branch, tag or commit to deploy; it must be pushed to GitHub.
     [ValidatePattern('^[A-Za-z0-9._/-]+$')]
     [string]$Ref = 'main',
@@ -45,7 +43,6 @@ function Get-Setting($Given, [string]$Name, $Default) {
 }
 
 $Domain = Get-Setting $Domain 'domain' $null
-$AllowedEmails = @(Get-Setting $AllowedEmails 'allowedEmails' @())
 $Project = Get-Setting $Project 'project' $null
 $Zone = Get-Setting $Zone 'zone' 'us-east1-b'
 
@@ -57,13 +54,6 @@ if (-not $Project -or $Project -notmatch '^[a-z][a-z0-9-]+$') {
     throw "Set the Google Cloud project ID with -Project or in $SettingsFile"
 }
 if ($Zone -notmatch '^[a-z0-9-]+$') { throw "Not a zone: $Zone" }
-if ($AllowedEmails.Count -eq 0) {
-    throw "Set the Garmin emails allowed to sign in with -AllowedEmails or in $SettingsFile"
-}
-foreach ($email in $AllowedEmails) {
-    if ($email -notmatch '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$') { throw "Not an email: $email" }
-}
-$Emails = ($AllowedEmails | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique) -join ','
 
 $Region = $Zone -replace '-[a-z]$', ''
 $Vm = 'garmin-mcp'
@@ -92,7 +82,7 @@ function Test-GCloud {
 
 $SshArgs = @('--zone', $Zone, '--strict-host-key-checking=no', '--tunnel-through-iap')
 
-Write-Host "Project: $Project, zone: $Zone, $Domain, allowed: $Emails"
+Write-Host "Project: $Project, zone: $Zone, $Domain"
 Invoke-GCloud services enable compute.googleapis.com iap.googleapis.com
 
 if (-not (Test-GCloud compute addresses describe $Address --region $Region)) {
@@ -149,7 +139,7 @@ try {
 # The arguments were validated above, so they need no quoting on the VM.
 # SSH through IAP occasionally drops at the end; setup-vm.sh is safe to
 # run again, so retry once.
-$SetupCommand = "bash /tmp/garmin-reader-setup-vm.sh $Domain $Emails $Ref"
+$SetupCommand = "bash /tmp/garmin-reader-setup-vm.sh $Domain $Ref"
 try {
     Invoke-GCloud compute ssh $Vm @SshArgs --command $SetupCommand
 } catch {

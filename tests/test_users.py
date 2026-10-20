@@ -51,7 +51,7 @@ def provider(tmp_path):
 
 @pytest.fixture
 def server(provider):
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), provider)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC), provider)
     for email, profile in PROFILES.items():
         provider.set_garmin_profile(email, profile)
     return server
@@ -244,7 +244,6 @@ def test_session_replaced_by_another_process_is_reloaded(server, provider, store
     # e.g. `garmin-reader-mcp --import-garmin-session` while the server runs
     other = GarminReaderOAuthProvider(tmp_path / "mcp_auth.sqlite", PUBLIC)
     try:
-        other.configure_allowed(USERS)
         other.set_garmin_profile(ME, 1001)
     finally:
         other.close()
@@ -261,33 +260,6 @@ def test_changed_profile_loads_the_new_store(server, provider, stores):
 
 
 # --- removing a user -----------------------------------------------------------------------
-
-
-def test_removed_user_loses_their_stored_garmin_session(tmp_path, stores):
-    db = tmp_path / "mcp_auth.sqlite"
-    provider = GarminReaderOAuthProvider(db, PUBLIC)
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), provider)
-    for email, profile in PROFILES.items():
-        provider.set_garmin_profile(email, profile)
-        user_token_store(profile).mkdir(parents=True)
-        (user_token_store(profile) / "garmin_tokens.json").write_text("{}")
-    sleep_as(server, ME)
-    sleep_as(server, FRIEND)
-    provider.close()
-
-    provider = GarminReaderOAuthProvider(db, PUBLIC)  # restarted with FRIEND removed
-    try:
-        server = mcp_server.build_server(
-            HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({ME})), provider
-        )
-        assert not user_token_store(2002).parent.exists()
-        assert (user_token_store(1001) / "garmin_tokens.json").exists()
-        assert set(mcp_server._profile_sessions) == {1001}
-        with as_user(FRIEND):
-            with pytest.raises(ToolError, match="Garmin session expired"):
-                asyncio.run(server.call_tool("call_garmin_endpoint", SLEEP))
-    finally:
-        provider.close()
 
 
 # --- importing a session signed in elsewhere ----------------------------------------------
@@ -313,14 +285,12 @@ def test_import_stores_the_session_as_that_users(monkeypatch, tmp_path, capsys):
         return session
 
     monkeypatch.setattr(mcp_server, "login", login)
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", f"{ME},{FRIEND}")
     assert mcp_server.main(["--import-garmin-session", "Friend@Example.com", str(tmp_path)]) == 0
     assert seen == [(tmp_path, {"prompt_mfa": mcp_server._no_mfa, "env_credentials": False})]
     assert session.dumped == [str(user_token_store(2002))]
     from garmin_reader.settings import state_dir
     provider = GarminReaderOAuthProvider(state_dir() / "mcp_auth.sqlite", PUBLIC)
     try:
-        provider.configure_allowed(USERS)
         assert provider.garmin_profile(FRIEND) == 2002
         assert provider.garmin_profile(ME) is None
     finally:
@@ -331,7 +301,6 @@ def test_import_stores_the_session_as_that_users(monkeypatch, tmp_path, capsys):
 def test_import_refuses_a_session_that_cant_be_renewed(monkeypatch, tmp_path, capsys):
     session = Importable(2002, refresh_token=None)
     monkeypatch.setattr(mcp_server, "login", lambda **_: session)
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", FRIEND)
     assert mcp_server.main(["--import-garmin-session", FRIEND, str(tmp_path)]) == 1
     assert "reusable tokens" in capsys.readouterr().err
     assert session.dumped == []
@@ -339,11 +308,6 @@ def test_import_refuses_a_session_that_cant_be_renewed(monkeypatch, tmp_path, ca
     assert not (state_dir() / "mcp_auth.sqlite").exists()  # no new revision either
 
 
-def test_import_refuses_users_who_arent_allowed(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(mcp_server, "login", lambda **_: pytest.fail("loaded a session"))
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", ME)
-    assert mcp_server.main(["--import-garmin-session", FRIEND, str(tmp_path)]) == 2
-    assert "isn't in GARMIN_READER_ALLOWED_EMAILS" in capsys.readouterr().err
 
 
 def test_import_reports_an_unusable_session(monkeypatch, tmp_path, capsys):
@@ -351,7 +315,6 @@ def test_import_reports_an_unusable_session(monkeypatch, tmp_path, capsys):
         raise GarminConnectAuthenticationError("token expired")
 
     monkeypatch.setattr(mcp_server, "login", login)
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", ME)
     assert mcp_server.main(["--import-garmin-session", ME, str(tmp_path)]) == 1
     assert "couldn't use the Garmin session" in capsys.readouterr().err
     from garmin_reader.settings import state_dir
@@ -424,7 +387,6 @@ def test_reset_waits_for_a_login_in_progress(server, provider, stores, monkeypat
 
 
 def test_moving_to_another_account_orphans_only_unshared_profiles(provider):
-    provider.configure_allowed(USERS)
     assert provider.set_garmin_profile(ME, 1001) is None
     assert provider.set_garmin_profile(ME, 1001) is None  # same account again
     assert provider.set_garmin_profile(FRIEND, 1001) is None
@@ -437,13 +399,12 @@ def test_startup_deletes_stored_sessions_nobody_uses(tmp_path):
     db = tmp_path / "mcp_auth.sqlite"
     provider = GarminReaderOAuthProvider(db, PUBLIC)
     try:
-        provider.configure_allowed(USERS)
         provider.set_garmin_profile(ME, 1001)
         for name in ("1001", "5555"):
             (users_dir() / name / "garmin_tokens").mkdir(parents=True)
         (users_dir() / "notes").mkdir()  # not a profile folder: left alone
         mcp_server._profile_sessions[5555] = mcp_server._ProfileSession(api=object())
-        mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=USERS), provider)
+        mcp_server.build_server(HttpSettings(public_url=PUBLIC), provider)
         assert sorted(p.name for p in users_dir().iterdir()) == ["1001", "notes"]
         assert 5555 not in mcp_server._profile_sessions
     finally:
@@ -452,11 +413,9 @@ def test_startup_deletes_stored_sessions_nobody_uses(tmp_path):
 
 def test_import_deletes_the_users_previous_session(monkeypatch, tmp_path, provider):
     monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(tmp_path))  # where `provider` keeps its database
-    provider.configure_allowed(USERS)
     provider.set_garmin_profile(FRIEND, 2002)
     user_token_store(2002).mkdir(parents=True)
     monkeypatch.setattr(mcp_server, "login", lambda **_: Importable(3003))
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", f"{ME},{FRIEND}")
     assert mcp_server.main(["--import-garmin-session", FRIEND, str(tmp_path / "import")]) == 0
     assert provider.garmin_profile(FRIEND) == 3003
     assert not user_token_store(2002).parent.exists()

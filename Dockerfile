@@ -35,5 +35,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
 ARG GARMIN_READER_GIT_COMMIT=
 ENV GARMIN_READER_GIT_COMMIT=$GARMIN_READER_GIT_COMMIT
 
-# GARMIN_READER_PUBLIC_URL and GARMIN_READER_ALLOWED_EMAILS are required at run time.
+# GARMIN_READER_PUBLIC_URL is required at run time.
 CMD ["garmin-reader-mcp", "--http"]

@@ -9,8 +9,8 @@ unauthenticated mode. Next: connecting the real clients (step 5). See
 ## Goal
 
 Let claude.ai (web and mobile) and ChatGPT use the garmin-reader MCP tools, not just
-local clients over stdio, for a few allowed people, each of whom sees only
-their own Garmin data.
+local clients over stdio, for anyone with a Garmin account, each of whom sees
+only their own Garmin data.
 
 ## Decisions
 
@@ -19,7 +19,7 @@ their own Garmin data.
 | Transport | Streamable HTTP without MCP sessions, behind a flag. stdio stays the default. |
 | Hosting | A PC behind a Cloudflare **quick tunnel** at first; code written so a move to an always-on host is a config change (now a Google Cloud VM, see deployment.md). |
 | MCP auth | OAuth 2.1 via the MCP SDK's built-in authorization server (`mcp.server.auth`), with dynamic client registration. |
-| Who may log in | Whoever completes a **Garmin login (with MFA) with an email on the allowlist** (`GARMIN_READER_ALLOWED_EMAILS`) on our `/login` page (reached via `/authorize`). Garmin accepting the password proves they own that account. No separate identity provider yet. |
+| Who may log in | Whoever completes a **Garmin login (with MFA)** on our `/login` page (reached via `/authorize`). There is no list of permitted users (there used to be, `GARMIN_READER_ALLOWED_EMAILS`). Garmin accepting the password proves they own that account. No separate identity provider yet. |
 | Several users | Each user's OAuth tokens carry their email; each tool call uses only the Garmin session stored for that user, never another's or a shared one. |
 | Later | A Google (or GitHub) sign-in step in front of the Garmin form, once the hostname is stable. Optionally, URL-mode elicitation as a nicer way to open `/login`. |
 | Garmin expiry | Tool error that tells the user exactly what to do, with a link to `/login`; no reconnecting the connector. This is the intended design, not a stopgap. |
@@ -56,8 +56,8 @@ The SDK provides the OAuth endpoints (`/.well-known/oauth-authorization-server`,
 `/revoke`) and bearer-token checks on `/mcp`. We implement
 `OAuthAuthorizationServerProvider` and one `/login` page via `custom_route`.
 
-`/login` has two entry points, sharing the same form, MFA step, allowlist
-check and rate limit:
+`/login` has two entry points, sharing the same form, MFA step
+and rate limit:
 
 - **With a pending OAuth request** (`/login?req=<id>`, reached from
   `/authorize`): after the Garmin login it completes the OAuth flow.
@@ -74,9 +74,8 @@ Connecting a client:
 2. `provider.authorize()` stores the pending request under a random,
    short-lived ID and returns a redirect to `/login?req=<id>`.
 3. `/login` (GET) shows a form: Garmin email + password.
-4. `/login` (POST) refuses an email that isn't on the allowlist (compared
-   lowercase) without contacting Garmin. Otherwise it logs in with
-   `Garmin(..., return_on_mfa=True)`.
+4. `/login` (POST) logs in with `Garmin(..., return_on_mfa=True)`; the
+   email is compared lowercase. Any email Garmin accepts gets in.
    - MFA required → keep the half-finished login state in memory under the
      request ID (a few minutes, never on disk) and show an MFA-code form.
      The second POST calls `resume_login(state, code)`. After a wrong code
@@ -106,8 +105,7 @@ Rules for the login page:
   per IP, since everything may arrive through one tunnel or proxy), then
   refuse until the window passes. Failed attempts reach Garmin, which can
   lock or throttle the account; this is what protects it. Per email, one
-  user's typos don't lock the others out; emails not on the allowlist never
-  reach Garmin, so they aren't counted.
+  user's typos don't lock the others out.
   In-flight attempts keep their slots through the profile lookup, including
   after the MFA step.
 - The pending request expires after 10 minutes; codes are single-use and
@@ -131,14 +129,11 @@ clients, refresh tokens, access tokens (hashed), and each user's Garmin
 profile. Moving hosts = copying this file and `users/`; skipping the copy
 costs one reconnect per client.
 
-Every token's subject is its user's email. Only allowed users get codes or
-tokens, and a token whose user isn't allowed doesn't load, even if it is
-still in the database. On startup, tokens and profiles of users no longer
-allowed are deleted, along with every stored Garmin session no allowed user
-has; so are tokens from the single-owner version, whose subject was a
-Garmin profile ID. When an email signs in to (or imports) a different
-Garmin account, its previous account's stored session is deleted at once,
-unless another allowed email still uses it.
+Every token's subject is its user's email. On startup, every stored Garmin
+session no user has is deleted, and so are tokens from the single-owner
+version, whose subject was a Garmin profile ID. When an email signs in to
+(or imports) a different Garmin account, its previous account's stored
+session is deleted at once, unless another email still uses it.
 
 The database also records a revocation generation. Pending sign-ins and
 authorization codes carry their starting generation, and token issuance
@@ -179,8 +174,7 @@ its own, read by a model that knows nothing about garmin-reader:
 Tests assert each of these parts is in the message.
 
 Opening `/login` directly needs no extra gate, because passing it requires
-logging in to Garmin with an allowed email; it refreshes that user's
-session only.
+logging in to Garmin; it refreshes that user's session only.
 
 `_no_mfa()`'s "run `garmin-reader fetch`" message stays for stdio; in HTTP mode the
 error points to `/login` instead.
@@ -193,7 +187,6 @@ All from environment variables (CLI flags may override), no hard-coded paths:
 |---|---|---|
 | `GARMIN_READER_PUBLIC_URL` | — (required with `--http`) | Public base URL, e.g. the quick-tunnel URL. Issuer and resource URL derive from it. |
 | `GARMIN_READER_PORT` | `8000` | Local port. |
-| `GARMIN_READER_ALLOWED_EMAILS` | — (required with `--http`) | Garmin login emails allowed to log in, comma-separated. |
 | `GARMIN_READER_STATE_DIR` | `~/.garmin-reader` | Holds `users/` (each HTTP user's Garmin session), `garmin_tokens/` (the CLI's and stdio's) and `mcp_auth.sqlite`. |
 
 The server refuses to start in HTTP mode without the required settings.
@@ -315,7 +308,7 @@ refused before any code runs.
   0600 where the OS supports it (on Windows the user profile's ACLs apply).
 - The OAuth scope is `garmin:read`. Registration is open to any client, as
   the MCP spec expects; what protects the data is that tokens are only
-  issued after an allowed user logs in on `/login`. That page should therefore
+  issued after a user logs in to Garmin on `/login`. That page should therefore
   show which client is asking and where it will send the user back
   (client name and redirect host), so a look-alike client can be spotted.
 
@@ -347,7 +340,8 @@ Still depends on the choice of host:
    *(done; `/login` is a 503 placeholder)*
 4. `/login` page (both entry points): Garmin login, MFA step, owner check,
    rate limit; tests with a faked `Garmin`. *(done; the owner check later
-   became an email allowlist with a Garmin session per user)*
+   became an email allowlist with a Garmin session per user, which was then
+   removed: anyone with a Garmin account may sign in)*
 5. Connect claude.ai and ChatGPT through a quick tunnel; check the current
    requirements of each (ChatGPT developer mode, claude.ai custom connectors).
 6. Later: Google sign-in gate, hosting; optionally URL-mode elicitation.

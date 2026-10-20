@@ -13,7 +13,7 @@ def isolated_state(tmp_path_factory, monkeypatch):
     """
     state = tmp_path_factory.mktemp("garmin-reader-state")
     monkeypatch.setenv("GARMIN_READER_STATE_DIR", str(state))
-    for name in ("GARMIN_EMAIL", "GARMIN_PASSWORD", "GARMINTOKENS", "GARMIN_READER_ALLOWED_EMAILS"):
+    for name in ("GARMIN_EMAIL", "GARMIN_PASSWORD", "GARMINTOKENS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(mcp_server, "_api", None)
     monkeypatch.setattr(mcp_server, "_profile_sessions", {})
