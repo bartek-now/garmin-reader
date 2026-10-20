@@ -2,4 +2,4 @@
 
 # Bump with every change: the last number for small changes, the middle
 # one for larger ones. pyproject.toml reads it from here.
-__version__ = "1.2.0"
+__version__ = "1.2.1"
