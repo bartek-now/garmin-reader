@@ -3,12 +3,11 @@
 # at the given git ref, writes the settings and (re)starts the containers.
 # Safe to run again; that's how updates happen.
 #
-# Usage: setup-vm.sh <domain> <allowed-emails,comma-separated> <git-ref>
+# Usage: setup-vm.sh <domain> <git-ref>
 set -euo pipefail
 
 DOMAIN=${1:?domain}
-EMAILS=${2:?allowed emails}
-REF=${3:?git ref}
+REF=${2:?git ref}
 REPO=https://github.com/bartek-now/garmin-reader.git
 DIR=/opt/garmin-reader
 
@@ -48,7 +47,7 @@ echo "garmin-reader at $(sudo git -C "$DIR" log -1 --format='%h %s')"
 # Settings, readable by root only.
 sudo install -m 600 /dev/null "$DIR/deploy/gcp/.env"
 COMMIT=$(sudo git -C "$DIR" rev-parse --short HEAD)
-printf 'GARMIN_READER_DOMAIN=%s\nGARMIN_READER_ALLOWED_EMAILS=%s\nGARMIN_READER_GIT_COMMIT=%s\n' "$DOMAIN" "$EMAILS" "$COMMIT" \
+printf 'GARMIN_READER_DOMAIN=%s\nGARMIN_READER_GIT_COMMIT=%s\n' "$DOMAIN" "$COMMIT" \
     | sudo tee "$DIR/deploy/gcp/.env" >/dev/null
 
 cd "$DIR/deploy/gcp"

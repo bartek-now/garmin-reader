@@ -1,6 +1,5 @@
 {
   "domain": "garminmcp.example.com",
   "project": "my-garmin-reader-project",
-  "zone": "us-east1-b",
-  "allowedEmails": ["you@example.com", "friend@example.com"]
+  "zone": "us-east1-b"
 }

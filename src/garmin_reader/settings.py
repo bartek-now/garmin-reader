@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ipaddress
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,8 +50,6 @@ class HttpSettings:
     public_url: str
     port: int = DEFAULT_PORT
     host: str = DEFAULT_HOST
-    # Garmin login emails (lowercase) allowed to sign in on /login.
-    allowed_emails: frozenset[str] = frozenset()
 
     @property
     def public_host(self) -> str:
@@ -65,14 +62,12 @@ class HttpSettings:
         env: Mapping[str, str] = os.environ,
         public_url: str | None = None,
         port: int | str | None = None,
-        allowed_emails: str | None = None,
         host: str | None = None,
     ) -> HttpSettings:
         """Explicit arguments (from CLI flags) win over
         GARMIN_READER_PUBLIC_URL, GARMIN_READER_PORT (or PORT, which hosting
-        platforms such as Cloud Run set), GARMIN_READER_HOST and
-        GARMIN_READER_ALLOWED_EMAILS. Raises ValueError naming the setting
-        that's wrong.
+        platforms such as Cloud Run set) and GARMIN_READER_HOST. Raises
+        ValueError naming the setting that's wrong.
         """
         url = public_url or env.get("GARMIN_READER_PUBLIC_URL")
         if not url:
@@ -86,9 +81,6 @@ class HttpSettings:
                 port if port is not None else env.get("GARMIN_READER_PORT") or env.get("PORT")
             ),
             host=_check_host(host or env.get("GARMIN_READER_HOST") or DEFAULT_HOST),
-            allowed_emails=parse_allowed_emails(
-                allowed_emails if allowed_emails is not None else env.get("GARMIN_READER_ALLOWED_EMAILS")
-            ),
         )
 
 
@@ -130,19 +122,6 @@ def _check_host(value: str) -> str:
             f"GARMIN_READER_HOST must be an IP address to listen on, e.g. 127.0.0.1 or "
             f"0.0.0.0: {value!r}"
         ) from None
-
-
-_EMAIL = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
-
-
-def parse_allowed_emails(value: str | None) -> frozenset[str]:
-    """GARMIN_READER_ALLOWED_EMAILS: Garmin login emails, separated by commas or
-    whitespace. Raises ValueError for anything that isn't an email.
-    """
-    emails = [normalize_email(e) for e in re.split(r"[,\s]+", value or "") if e.strip()]
-    if bad := [e for e in emails if not _EMAIL.fullmatch(e)]:
-        raise ValueError(f"GARMIN_READER_ALLOWED_EMAILS has entries that aren't emails: {bad}")
-    return frozenset(emails)
 
 
 def _check_port(value: int | str | None) -> int:

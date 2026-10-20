@@ -217,47 +217,25 @@ def test_main_defaults_to_stdio(runs):
 
 
 def test_main_http_always_uses_oauth(runs, capsys, tmp_path):
-    assert mcp_server.main(["--http", "--public-url", PUBLIC, "--allowed-emails", "me@example.com"]) == 0
+    assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 0
     [(server, transport)] = runs
     assert transport == "streamable-http"
     assert server.settings.auth is not None
     assert str(server.settings.auth.issuer_url).rstrip("/") == PUBLIC
     assert (tmp_path / "mcp_auth.sqlite").exists()
-    assert f"1 user(s) may sign in at {PUBLIC}/login" in capsys.readouterr().err
+    assert f"anyone with a Garmin account may sign in at {PUBLIC}/login" in capsys.readouterr().err
 
 
 def test_main_http_has_no_unauthenticated_mode(runs):
     with pytest.raises(SystemExit):
-        mcp_server.main(["--http", "--no-auth", "--public-url", PUBLIC, "--allowed-emails", "me@example.com"])
+        mcp_server.main(["--http", "--no-auth", "--public-url", PUBLIC])
     assert runs == []
 
 
-def test_main_http_requires_allowed_emails(runs, capsys):
-    assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
+def test_main_http_rejects_the_removed_allowed_emails_flag(runs):
+    with pytest.raises(SystemExit):
+        mcp_server.main(["--http", "--public-url", PUBLIC, "--allowed-emails", "me@example.com"])
     assert runs == []
-    assert "GARMIN_READER_ALLOWED_EMAILS" in capsys.readouterr().err
-
-
-def test_main_http_rejects_entries_that_arent_emails(runs, capsys, monkeypatch):
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", "me@example.com, 2426101")
-    assert mcp_server.main(["--http", "--public-url", PUBLIC]) == 2
-    assert "aren't emails" in capsys.readouterr().err and runs == []
-
-
-def test_allowed_emails_are_lowercased_and_split():
-    s = HttpSettings.from_env({
-        "GARMIN_READER_PUBLIC_URL": PUBLIC,
-        "GARMIN_READER_ALLOWED_EMAILS": " Me@Example.com,friend@example.com\n a@b.pl ",
-    })
-    assert s.allowed_emails == {"me@example.com", "friend@example.com", "a@b.pl"}
-
-
-def test_allowed_emails_flag_wins_over_env():
-    s = HttpSettings.from_env(
-        {"GARMIN_READER_PUBLIC_URL": PUBLIC, "GARMIN_READER_ALLOWED_EMAILS": "env@example.com"},
-        allowed_emails="flag@example.com",
-    )
-    assert s.allowed_emails == {"flag@example.com"}
 
 
 def test_main_http_reports_bad_settings(runs, capsys):
@@ -268,7 +246,6 @@ def test_main_http_reports_bad_settings(runs, capsys):
 
 def test_main_http_runs_streamable_http(runs, monkeypatch):
     monkeypatch.setenv("GARMIN_READER_PUBLIC_URL", PUBLIC)
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", "me@example.com")
     assert mcp_server.main(["--http", "--port", "8123"]) == 0
     [(server, transport)] = runs
     assert transport == "streamable-http"
@@ -367,7 +344,6 @@ def test_platform_port_is_used_when_garmin_reader_port_isnt_set():
 
 def test_main_listens_where_told(runs, monkeypatch):
     monkeypatch.setenv("GARMIN_READER_PUBLIC_URL", PUBLIC)
-    monkeypatch.setenv("GARMIN_READER_ALLOWED_EMAILS", "me@example.com")
     monkeypatch.setenv("GARMIN_READER_HOST", "0.0.0.0")
     assert mcp_server.main(["--http"]) == 0
     [(server, _)] = runs
@@ -378,7 +354,7 @@ def test_healthz_needs_no_sign_in_and_says_nothing_else(tmp_path):
     from garmin_reader.oauth import GarminReaderOAuthProvider
 
     provider = GarminReaderOAuthProvider(tmp_path / "a.sqlite", PUBLIC)
-    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC, allowed_emails=frozenset({"me@example.com"})), provider)
+    server = mcp_server.build_server(HttpSettings(public_url=PUBLIC), provider)
     with TestClient(server.streamable_http_app(), base_url=PUBLIC) as c:
         assert post(c, INIT).status_code == 401  # /mcp still needs a token
         # Health checks often come from inside the platform, with any Host.

@@ -8,9 +8,8 @@ Two ways in, one form:
 - Opened directly (the link in the "Garmin session expired" tool error): it
   only refreshes that user's stored Garmin tokens.
 
-Either way, only emails on the server's allowlist get through, checked
-before Garmin is contacted; Garmin accepting the password proves the
-person owns that account. Each user's Garmin session is stored apart from
+Either way, anyone with a Garmin account can sign in: Garmin accepting
+the password proves the person owns that account. Each user's Garmin session is stored apart from
 everyone else's. The password lives only in the request handler's memory;
 it is never logged, stored or echoed back. Failed attempts reach Garmin,
 which can lock the account, so they are capped per email.
@@ -51,6 +50,9 @@ from garmin_reader.settings import normalize_email
 # per-IP limits would mean nothing.
 MAX_FAILURES = 5
 FAILURE_WINDOW_SECONDS = 60 * 60
+# Emails with failures remembered at once. Every failure costs a Garmin
+# round trip, so honest use stays far below this.
+MAX_TRACKED_EMAILS = 1000
 # How long the MFA step may take, and how many can be in progress.
 MFA_SECONDS = 5 * 60
 MAX_MFA_FLOWS = 20
@@ -332,12 +334,6 @@ class LoginPage:
         user = normalize_email(email)
         if not user or not password:
             return self._form(request, request_id, error="Enter your Garmin email and password.", email=email)
-        if not self.oauth.is_allowed(user):
-            # Refused before Garmin is contacted: nothing to count or lock.
-            return self._form(
-                request, request_id, email=email,
-                error="That email isn't allowed to use this server.",
-            )
         if locked := self._locked(request, request_id, user):
             return locked
         with self._attempt(user):
@@ -401,7 +397,7 @@ class LoginPage:
                 return response
 
     async def _finish(self, request, api, user, request_id) -> Response:
-        """`user` (an allowed email) signed in to Garmin: keep the session
+        """`user` (an email) signed in to Garmin: keep the session
         as theirs, then finish the connection request if there is one.
         """
         try:
@@ -481,7 +477,15 @@ class LoginPage:
         if isinstance(err, GarminConnectConnectionError):
             # Garmin unreachable: not the user's fault, not counted.
             return "Couldn't reach Garmin. Please try again in a moment."
-        self._failures.setdefault(user, deque()).append(time.time())
+        now = time.time()
+        if user not in self._failures and len(self._failures) >= MAX_TRACKED_EMAILS:
+            # Anyone can try any email, so emails tried once and never again
+            # would otherwise pile up: drop expired ones, then the stalest.
+            cutoff = now - FAILURE_WINDOW_SECONDS
+            self._failures = {e: f for e, f in self._failures.items() if f[-1] > cutoff}
+            while len(self._failures) >= MAX_TRACKED_EMAILS:
+                del self._failures[min(self._failures, key=lambda e: self._failures[e][-1])]
+        self._failures.setdefault(user, deque()).append(now)
         if isinstance(err, GarminConnectTooManyRequestsError):
             return "Garmin is limiting sign-ins right now. Please wait a few minutes."
         if what == "code":

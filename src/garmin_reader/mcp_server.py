@@ -48,7 +48,6 @@ from garmin_reader.oauth import GarminReaderOAuthProvider, auth_settings
 from garmin_reader.settings import (
     HttpSettings,
     normalize_email,
-    parse_allowed_emails,
     state_dir,
     user_token_store,
     users_dir,
@@ -495,9 +494,8 @@ def build_server(
             ),
         )
     if oauth is not None:
-        if http is None or not http.allowed_emails:
-            raise ValueError("OAuth needs HTTP settings with the public URL and allowed emails")
-        oauth.configure_allowed(http.allowed_emails)
+        if http is None:
+            raise ValueError("OAuth needs HTTP settings with the public URL")
         _remove_unused_sessions(oauth.garmin_profiles())
         kwargs.update(auth_server_provider=oauth, auth=auth_settings(http.public_url))
     server = FastMCP("garmin-reader", **kwargs)
@@ -575,15 +573,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "0.0.0.0 in a container)",
     )
     parser.add_argument(
-        "--allowed-emails", metavar="EMAILS",
-        help="Garmin login emails allowed to sign in, comma-separated "
-        "(default: $GARMIN_READER_ALLOWED_EMAILS)",
-    )
-    parser.add_argument(
         "--import-garmin-session", nargs=2, metavar=("EMAIL", "FOLDER"),
         help="Store the Garmin session in FOLDER (garmin_tokens.json, e.g. from "
         "`garmin-reader fetch`) as EMAIL's, for when Garmin refuses sign-ins from the "
-        "server's address; then exit. EMAIL must be allowed",
+        "server's address; then exit",
     )
     parser.add_argument(
         "--revoke-all", action="store_true",
@@ -598,50 +591,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.revoke_all:
         return _revoke_all()
     if args.import_garmin_session:
-        return _import_garmin_session(*args.import_garmin_session, args.allowed_emails)
+        return _import_garmin_session(*args.import_garmin_session)
     if not args.http:
         mcp.run()
         return 0
     try:
         http = HttpSettings.from_env(
-            public_url=args.public_url, port=args.port, allowed_emails=args.allowed_emails,
-            host=args.host,
+            public_url=args.public_url, port=args.port, host=args.host,
         )
-        if not http.allowed_emails:
-            raise ValueError(
-                "HTTP mode needs the Garmin emails allowed to sign in: set "
-                "GARMIN_READER_ALLOWED_EMAILS or pass --allowed-emails"
-            )
     except ValueError as e:
         print(f"garmin-reader-mcp: {e}", file=sys.stderr)
         return 2
     oauth = GarminReaderOAuthProvider(state_dir() / "mcp_auth.sqlite", http.public_url)
     print(
         f"garmin-reader-mcp: serving {http.public_url}/mcp from {http.host}:{http.port}; "
-        f"{len(http.allowed_emails)} user(s) may sign in at {http.public_url}/login",
+        f"anyone with a Garmin account may sign in at {http.public_url}/login",
         file=sys.stderr,
     )
     serve_http(build_server(http, oauth))
     return 0
 
 
-def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) -> int:
+def _import_garmin_session(email: str, folder: str) -> int:
     """For when Garmin refuses sign-ins from the server's address: a session
-    signed in elsewhere becomes one allowed user's own, as if they had
-    signed in on /login. A running server reloads it at the user's next
-    call: the import gives that profile's stored session a new revision.
+    signed in elsewhere becomes one user's own, as if they had signed in on
+    /login. A running server reloads it at the user's next call: the import
+    gives that profile's stored session a new revision.
     """
-    try:
-        allowed = parse_allowed_emails(
-            allowed_emails if allowed_emails is not None else os.environ.get("GARMIN_READER_ALLOWED_EMAILS")
-        )
-    except ValueError as e:
-        print(f"garmin-reader-mcp: {e}", file=sys.stderr)
-        return 2
     user = normalize_email(email)
-    if user not in allowed:
-        print(f"garmin-reader-mcp: {user} isn't in GARMIN_READER_ALLOWED_EMAILS.", file=sys.stderr)
-        return 2
     try:
         api = login(token_store=Path(folder), prompt_mfa=_no_mfa, env_credentials=False)
         profile = garmin_profile_id(api)
@@ -653,8 +630,6 @@ def _import_garmin_session(email: str, folder: str, allowed_emails: str | None) 
         return 1
     provider = GarminReaderOAuthProvider(state_dir() / "mcp_auth.sqlite", public_url="")
     try:
-        # The same allowlist as the server's, so this changes nothing else.
-        provider.configure_allowed(allowed)
         if (previous := provider.set_garmin_profile(user, profile)) is not None:
             shutil.rmtree(user_token_store(previous).parent, ignore_errors=True)
     finally:
