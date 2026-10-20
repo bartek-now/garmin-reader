@@ -133,7 +133,7 @@ ALLOWED = frozenset({
     "nutrition_daily_meals", "nutrition_daily_settings", "nutrition_status",
     # Devices and gear (IDs, names and serial numbers are stripped)
     "active_devices", "activity_gear", "activity_gear_v2", "all_devices",
-    "device_alarms", "device_last_used", "device_messages", "devices",
+    "device_alarms", "device_last_used", "devices",
     "gear_activities", "gear_details", "gear_list", "gear_make_models",
     "gear_stats", "gear_types", "historical_devices",
     "primary_training_device", "sensors", "sync_timestamp",
@@ -199,6 +199,9 @@ DENIED = {
     "device_solar_data": _NEEDS_DEVICE_ID,
     "device_solar_gain": _NEEDS_DEVICE_ID,
     "user_device": _NEEDS_DEVICE_ID,
+    # Its fields are free-form: a pushed workout's title arrives as
+    # `messageName`, and nothing in it is health data.
+    "device_messages": "the watch's message queue: titles of pushed workouts, no health data",
     "gear": _NEEDS_PROFILE_ID,
     "gear_defaults": _NEEDS_PROFILE_ID,
 }

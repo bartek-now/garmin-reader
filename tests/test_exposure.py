@@ -18,6 +18,7 @@ SENSITIVE = [
     "activity_details", "activity_polyline", "activity_map_details",
     "activity_weather", "course", "jetlag_status", "heat_altitude_acclimation",
     "user_profile", "userprofile_settings", "full_name", "personal_information",
+    "device_messages",  # a queued workout's title arrives as `messageName`
 ]
 
 # Shaped like real get_activities / get_activity responses.

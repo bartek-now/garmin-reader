@@ -242,6 +242,8 @@ data).
 - Identity: `full_name`, `user_profile(_base)`, `userprofile_settings`,
   `personal_information`.
 - Other people's data: friends' (`adhoc`) challenges.
+- `device_messages`, the watch's message queue: a pushed workout's title
+  arrives there as `messageName`, and nothing in it is health data.
 - Getters that need an ID results never carry: the per-device ones
   (`device_settings`, `device_solar_*`, ...) and `gear`/`gear_defaults`
   (`gear_list` covers gear).
