@@ -217,53 +217,60 @@ stand-in object that checks every attribute against the policy (including
 the curated tools, which only use allowed endpoints anyway). Code running
 outside a tool wrapper gets the policy too.
 
-**Allowed** (health and fitness):
+Every `garminconnect` getter is either **allowed** or **denied**, in two
+explicit lists in `endpoints.py` (`ALLOWED`, and `DENIED` with a reason for
+each). A test fails when a getter is on neither list, so one the library adds
+is blocked until someone decides on it, rather than staying blocked
+unnoticed: the first allowlist predated about 145 getters, and ~20 of them
+were missing from `get_garmin_day` until this rule.
 
-- Daily metrics: `stats`, `stats_and_body`, `user_summary`, `daily_steps`,
-  `steps_data`, `floors`, `heart_rates`, `rhr_day`, `hrv_data`, `sleep_data`,
-  `stress_data`, `all_day_stress`, `body_battery`, `body_battery_events`,
-  `respiration_data`, `spo2_data`, `hydration_data`,
-  `intensity_minutes_data`, `all_day_events`, `weekly_steps`,
-  `weekly_stress`, `weekly_intensity_minutes`
-- Body: `weigh_ins`, `daily_weigh_ins`, `body_composition`, `blood_pressure`
-- Training: `training_readiness`, `morning_training_readiness`,
-  `training_status`, `max_metrics`, `endurance_score`, `hill_score`,
-  `race_predictions`, `fitnessage_data`, `lactate_threshold`, `cycling_ftp`,
-  `running_tolerance`, `personal_record`, `progress_summary_between_dates`
-- Activities (completed sessions; the source of workout calories in
-  `get_garmin_summary`): `activities`, `activities_by_date`,
-  `activities_fordate`, `activity`, `last_activity`, `activity_splits`,
-  `activity_split_summaries`, `activity_typed_splits`,
-  `activity_exercise_sets`, `activity_hr_in_timezones`,
-  `activity_power_in_timezones`, `activity_types`
-- Workouts (planned workout templates and the schedule): `workouts`,
-  `workout_by_id`, `scheduled_workouts`
-- Nutrition: `nutrition_daily_food_log`, `nutrition_daily_meals`,
-  `nutrition_daily_settings`, `lifestyle_logging_data`
+The privacy line is drawn by the filter below, not by the lists: anything
+whose health or fitness substance survives stripping is allowed. That
+includes devices, gear, badges, golf, goals and training plans (harmless once
+stripped), and women's health and ECG (sensitive, but the owner's own health
+data).
 
-**Not allowed:** `activity_details` (GPS track), `activity_weather`
-(location-derived), profile and settings (`user_profile`,
-`userprofile_settings`, `full_name`, `unit_system`), devices, gear, badges and
-challenges, golf, training plans, `goals`,
-`menstrual_*` and `pregnancy_summary`.
+**Denied** are only the endpoints whose substance stripping can't remove:
+
+- Location: GPS tracks and per-second samples (`activity_details`,
+  `activity_subsecond_details`, `activity_swim_details`,
+  `activity_map_details`, `activity_polyline`), `activity_weather`,
+  `activity_segments`, `activity_images`, courses, and `golf_shot_data`.
+- Travel: `jetlag_*` and `heat_altitude_acclimation*`.
+- Race events, named after where and when they happen: `calendar_event(s)`,
+  `calendar_week`, `upcoming_events`, `primary_event`.
+- Identity: `full_name`, `user_profile(_base)`, `userprofile_settings`,
+  `personal_information`.
+- Other people's data: friends' (`adhoc`) challenges.
+- Getters that need an ID results never carry: the per-device ones
+  (`device_settings`, `device_solar_*`, ...) and `gear`/`gear_defaults`
+  (`gear_list` covers gear).
 
 **Stripping private fields:** activity summaries and splits carry start/end
 coordinates (`startLatitude`, `endLongitude`, …), and `get_activity` has a
 place name (`locationName`); these reveal where the owner lives. Allowed
-activity endpoints also carry the owner's identity (`ownerFullName`,
-`ownerDisplayName`, `ownerProfileImageUrl*`, `userInfoDto`), which blocking
-`full_name` and `user_profile` is meant to keep out. Every result
-passes through a filter that drops, recursively, keys containing the words
-`latitude`, `longitude`, `polyline`, `geo`, `location`, `owner`, `fullname`,
-`displayname`, `email`, `description`, `chronological`, `birth`, `birthdate`
-or `birthday` (actual age and birth date; Garmin's fitness age is kept), or
-the word pairs "full name", "display name", "profile image", "user info",
-"activity name", "course name" or "workout name" (these titles can contain
-places). Keys are split into words (camelCase or snake_case) and compared whole, so `averageOxygen…` and `timeAllocation` are
-kept. Elevation and time zone are left in: they're coarse.
+endpoints also carry the owner's identity (`ownerFullName`,
+`ownerDisplayName`, `ownerProfileImageUrl*`, `userInfoDto`, `userId`,
+`userProfilePk`) and their devices' (`deviceId`, `unitId`, `serialNumber`,
+`deviceName`). Every result passes through a filter that drops, recursively,
+keys containing the words `latitude`, `longitude`, `lat`, `lon`, `lng`, `gps`,
+`polyline`, `geo`, `location`, `altitude`, `owner`, `fullname`,
+`displayname`, `email`, `description`, `chronological`, `birth`, `birthdate`,
+`birthday` (actual age and birth date; Garmin's fitness age is kept) or
+`serial`, or the word pairs "full name", "display name", "user name",
+"profile image", "user info", "activity name", "course name", "workout name"
+(these titles can contain places), "user id", "user profile", "profile id",
+"profile pk", "device id", "unit id", "device name", "image url" or "settings
+file". Keys are split into words (camelCase or snake_case) and compared whole,
+so `averageOxygen…`, `timeAllocation` and `latestSpo2` are kept. Elevation
+(how hilly, not where), a device's model and time zone are left in: they're
+coarse.
 
-The allowlist lives in `endpoints.py` as one explicit set, so new
-`garminconnect` getters are blocked until added on purpose.
+Device IDs also appear as dict keys (`training_status` is keyed by device).
+The filter renames keys equal to a device ID found in the same result to
+`device`, `device 2`, …, so the data stays and the ID goes. Only IDs of six
+digits or more count (Garmin's have ten), so zone or rank keys like `"2"` are
+never renamed.
 
 `get_garmin_summary` reads HRV, sleep and training readiness for a date
 range through garminconnect's range getters (`get_hrv_data_range`,
@@ -283,7 +290,11 @@ refused before any code runs.
 - A getter that's on neither list (e.g. a made-up `get_new_thing` added to the
   faked `Garmin`) is rejected too, proving the default is deny.
 - Every allowlisted name exists on the installed `garminconnect.Garmin`, so a
-  library rename can't silently drop an endpoint.
+  library rename can't silently drop an endpoint, and every getter is on
+  exactly one of the two lists.
+- A `training_status` fixture shaped like a real response comes out with no
+  profile or device IDs, device names, image URLs or altitude, its
+  device-keyed maps renamed.
 - Stripping removes nested coordinate and identity keys (in lists and nested
   objects) and keeps look-alike health fields unchanged; no allowlisted
   endpoint name counts as private.

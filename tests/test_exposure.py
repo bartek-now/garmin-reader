@@ -11,14 +11,13 @@ from garmin_reader import endpoints, mcp_server
 from garmin_reader.settings import HttpSettings
 
 GETTERS = {name.removeprefix("get_") for name in endpoints._getters()}
-DISALLOWED = sorted(GETTERS - endpoints.ALLOWED)
+DISALLOWED = sorted(endpoints.DENIED)
 
-# Named in the design doc's "Not allowed" list.
+# Location or identity is their substance, so stripping can't make them safe.
 SENSITIVE = [
-    "activity_details", "activity_weather", "user_profile",
-    "userprofile_settings", "full_name", "unit_system", "devices", "gear",
-    "goals", "training_plans", "menstrual_data_for_date",
-    "menstrual_calendar_data", "pregnancy_summary",
+    "activity_details", "activity_polyline", "activity_map_details",
+    "activity_weather", "course", "jetlag_status", "heat_altitude_acclimation",
+    "user_profile", "userprofile_settings", "full_name", "personal_information",
 ]
 
 # Shaped like real get_activities / get_activity responses.
@@ -43,10 +42,73 @@ LOCATED = {
 KEPT = {
     "averageOxygenSaturation": 97,  # avera-GEO-xygen
     "timeAllocation": 5,  # al-LOCATION
-    "userProfilePK": 123,
     "name": "Late Meals",  # lifestyle log entries must survive
-    "imageURL": "https://img.example/device.png",
     "geography_score": 1,
+    "elevationGain": 120.0,  # how hilly, not where
+    "maxElevation": 80.0,
+    "deviceTypeSimpleName": "Garmin fenix 8",  # a model, not a person
+    "longestStreak": 9,
+    "latestSpo2": 96,
+}
+
+# Shaped like a real get_training_status response; the IDs are made up.
+PROFILE_ID, DEVICE_ID, OTHER_DEVICE_ID = 1234567, 3500000001, 3400000002
+RECORDED_DEVICES = [
+    {"deviceId": DEVICE_ID, "imageURL": "https://res.example/watch.png",
+     "deviceName": "fenix 8 - 47mm, AMOLED", "category": 0},
+    {"deviceId": OTHER_DEVICE_ID, "imageURL": "https://res.example/old.png",
+     "deviceName": "fenix 7X", "category": 0},
+]
+TRAINING_STATUS = {
+    "userId": PROFILE_ID,
+    "mostRecentVO2Max": {
+        "userId": PROFILE_ID,
+        "generic": {"calendarDate": "2026-10-18", "vo2MaxPreciseValue": 51.3, "vo2MaxValue": 51.0},
+        "heatAltitudeAcclimation": {
+            "calendarDate": "2026-10-19", "altitudeAcclimation": 0,
+            "previousAltitudeAcclimation": 0, "heatAcclimationPercentage": 0,
+            "currentAltitude": 1650, "previousAltitude": 0,
+            "altitudeAcclimationLocalTimestamp": "2026-10-19T23:57:45.0",
+        },
+    },
+    "mostRecentTrainingLoadBalance": {
+        "userId": PROFILE_ID,
+        "metricsTrainingLoadBalanceDTOMap": {
+            str(DEVICE_ID): {
+                "calendarDate": "2026-10-19", "deviceId": DEVICE_ID,
+                "monthlyLoadAerobicLow": 606.9, "monthlyLoadAnaerobic": 131.0,
+                "trainingBalanceFeedbackPhrase": "AEROBIC_HIGH_SHORTAGE",
+                "primaryTrainingDevice": True,
+            },
+        },
+        "recordedDevices": RECORDED_DEVICES,
+    },
+    "mostRecentTrainingStatus": {
+        "userId": PROFILE_ID,
+        "latestTrainingStatusData": {
+            str(DEVICE_ID): {
+                "calendarDate": "2026-10-19", "trainingStatus": 8,
+                "deviceId": DEVICE_ID, "sport": "RUNNING",
+                "trainingStatusFeedbackPhrase": "STRAINED_4",
+                "acuteTrainingLoadDTO": {"acwrPercent": 42, "dailyTrainingLoadAcute": 255},
+                "primaryTrainingDevice": True,
+            },
+            str(OTHER_DEVICE_ID): {"calendarDate": "2026-09-01", "trainingStatus": 4,
+                                   "deviceId": OTHER_DEVICE_ID},
+        },
+        "recordedDevices": RECORDED_DEVICES,
+        "showSelector": False,
+    },
+    "heatAltitudeAcclimationDTO": None,
+}
+# Shaped like a real get_devices entry.
+DEVICE = {
+    "deviceId": DEVICE_ID, "unitId": DEVICE_ID, "serialNumber": "5ABC12345",
+    "displayName": "Bartek's watch", "productDisplayName": "fenix 8",
+    "imageUrl": "https://res.example/watch.png",
+    "gcmSettingsFile": "Fenix8_dd1ba4bc-485d-437b-b7bb-3e11f1b1526c.json",
+    "deviceTypeSimpleName": "Garmin fenix 8", "currentFirmwareVersion": "21.19",
+    "userProfileCapable": True,
 }
 
 
@@ -95,10 +157,31 @@ def test_allowlisted_names_exist_in_garminconnect():
     assert endpoints.ALLOWED <= GETTERS
 
 
+def test_every_getter_is_allowed_or_denied():
+    # A getter garminconnect adds must be decided on, not silently blocked
+    # (or, worse, silently exposed).
+    undecided = GETTERS - endpoints.ALLOWED - set(endpoints.DENIED)
+    assert not undecided, f"add these to endpoints.ALLOWED or DENIED: {sorted(undecided)}"
+
+
+def test_no_getter_is_both_allowed_and_denied():
+    assert not endpoints.ALLOWED & set(endpoints.DENIED)
+
+
+def test_denied_names_exist_in_garminconnect():
+    assert set(endpoints.DENIED) <= GETTERS
+    assert all(endpoints.DENIED.values())  # each with its reason
+
+
 @pytest.mark.parametrize("name", SENSITIVE)
-def test_sensitive_endpoints_not_allowlisted(name):
-    assert name in GETTERS
-    assert name not in endpoints.ALLOWED
+def test_sensitive_endpoints_denied(name):
+    assert name in endpoints.DENIED
+
+
+def test_every_single_day_metric_is_decided():
+    # get_garmin_day's metrics in particular: the gap that hid new ones.
+    for name in endpoints.single_day_metrics():
+        assert name in endpoints.ALLOWED or name in endpoints.DENIED, name
 
 
 def test_default_day_metrics_allowlisted():
@@ -185,7 +268,35 @@ def test_strip_private_keeps_lookalike_keys():
     assert endpoints.strip_private({"x": [KEPT]}) == {"x": [KEPT]}
 
 
-def test_strip_private_leaves_other_data_alone():
+def test_training_status_has_no_ids_device_names_or_altitude():
+    out = endpoints.strip_private(TRAINING_STATUS)
+    text = json.dumps(out)
+    for value in (PROFILE_ID, DEVICE_ID, OTHER_DEVICE_ID, "fenix", "res.example"):
+        assert str(value) not in text
+    for key in ("userId", "deviceId", "deviceName", "imageURL", "Altitude", "altitude"):
+        assert key not in text
+    # Device-keyed maps keep their data under neutral keys, one per device.
+    status = out["mostRecentTrainingStatus"]["latestTrainingStatusData"]
+    assert status["device"]["trainingStatusFeedbackPhrase"] == "STRAINED_4"
+    assert status["device 2"] == {"calendarDate": "2026-09-01", "trainingStatus": 4}
+    balance = out["mostRecentTrainingLoadBalance"]["metricsTrainingLoadBalanceDTOMap"]
+    assert balance["device"]["monthlyLoadAerobicLow"] == 606.9
+    assert out["mostRecentTrainingStatus"]["recordedDevices"] == [{"category": 0}] * 2
+    assert out["mostRecentVO2Max"]["generic"]["vo2MaxValue"] == 51.0
+    # Like the denied heat_altitude_acclimation endpoint: it reveals travel.
+    assert "heatAltitudeAcclimation" not in out["mostRecentVO2Max"]
+
+
+def test_devices_keep_the_model_but_nothing_that_identifies_them():
+    out = endpoints.strip_private([DEVICE])
+    assert out == [{"deviceTypeSimpleName": "Garmin fenix 8", "currentFirmwareVersion": "21.19"}]
+
+
+def test_numeric_keys_that_are_no_device_id_are_kept():
+    # Small numbers (zones, ranks) are never taken for device IDs.
+    data = {"zones": {"1": 60, "2": 120}, "deviceId": 2}
+    assert endpoints.strip_private(data) == {"zones": {"1": 60, "2": 120}}
+
     data = {"a": [1, {"b": None, "c": [{"d": "x"}]}], "e": 2.5, "f": "latitude"}
     assert endpoints.strip_private(data) == data
     assert endpoints.strip_private([LOCATED])[0] == endpoints.strip_private(LOCATED)

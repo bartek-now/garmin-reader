@@ -108,11 +108,12 @@ the private hooks and library behavior garmin-reader depends on, and the checks 
   garminconnect version, and whether it's stale (code on disk changed since
   it started).
 
-Over stdio and HTTP alike, the tools only reach an allowlist of health and
-fitness endpoints (`ALLOWED` in `endpoints.py`), and location and identity
-data (coordinates, GPS tracks, place names, your name and profile photo) is
-stripped from every result. A local server gets no more than a remote one:
-either way the results go to a model and its provider.
+Over stdio and HTTP alike, location and identity data (coordinates, GPS
+tracks, altitude, place names, your name and profile photo, profile and
+device IDs) is stripped from every result, and the endpoints whose substance
+is location or identity (`DENIED` in `endpoints.py`) are left out. A local
+server gets no more than a remote one: either way the results go to a model
+and its provider.
 
 `garmin-reader fetch` output is unchanged. Login is non-interactive, so run
 `garmin-reader fetch` once in a terminal first to cache the session token.
