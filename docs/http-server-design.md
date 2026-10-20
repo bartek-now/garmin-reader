@@ -23,7 +23,7 @@ only their own Garmin data.
 | Several users | Each user's OAuth tokens carry their email; each tool call uses only the Garmin session stored for that user, never another's or a shared one. |
 | Later | A Google (or GitHub) sign-in step in front of the Garmin form, once the hostname is stable. Optionally, URL-mode elicitation as a nicer way to open `/login`. |
 | Garmin expiry | Tool error that tells the user exactly what to do, with a link to `/login`; no reconnecting the connector. This is the intended design, not a stopgap. |
-| Exposure | Remotely, `call_garmin_endpoint` is limited to an **allowlist** of health/fitness endpoints, with location fields stripped. stdio is unrestricted. |
+| Exposure | `call_garmin_endpoint` is limited to an **allowlist** of health/fitness endpoints, with location and identity fields stripped, over stdio and HTTP alike (stdio used to be unrestricted; see section 5). |
 
 ## 1. Transport
 
@@ -199,77 +199,98 @@ starts the server is a possible convenience later.
 
 ## 5. Remote exposure
 
-In HTTP mode, tools only reach allowlisted endpoints; stdio stays
-unrestricted. `call_garmin_endpoint` fails with "not available remotely" for
+Tools only reach allowlisted endpoints, whatever the transport.
+`call_garmin_endpoint` fails with "not available in garmin-reader" for
 anything else, `list_garmin_endpoints` only lists allowed endpoints, and a
-disallowed `metrics` entry of `get_garmin_day` gets its own "not available
-remotely" error while the other metrics are returned.
+disallowed `metrics` entry of `get_garmin_day` gets its own "not available"
+error while the other metrics are returned.
+
+stdio used to be unrestricted, on the idea that a local server keeps the data
+on the machine. It doesn't: Claude Desktop sends tool results to Anthropic
+like claude.ai does, and can forward a cloud session's calls to the local
+server. Every MCP client hands the data to a model, so there is one policy.
+Unfiltered access, if ever needed, belongs in the CLI, whose output goes to
+a terminal, not a model.
 
 The allowlist is enforced in one place: tools reach Garmin only through a
-stand-in object that checks every attribute against the current policy
-(including the curated tools, which only use allowed endpoints anyway). The
-policy fails closed: code running outside a tool wrapper gets the remote
-rules, and stdio tools unlock everything explicitly.
+stand-in object that checks every attribute against the policy (including
+the curated tools, which only use allowed endpoints anyway). Code running
+outside a tool wrapper gets the policy too.
 
-**Allowed** (health and fitness):
+Every `garminconnect` getter is either **allowed** or **denied**, in two
+explicit lists in `endpoints.py` (`ALLOWED`, and `DENIED` with a reason for
+each). A test fails when a getter is on neither list, so one the library adds
+is blocked until someone decides on it, rather than staying blocked
+unnoticed: the first allowlist predated about 145 getters, and ~20 of them
+were missing from `get_garmin_day` until this rule.
 
-- Daily metrics: `stats`, `stats_and_body`, `user_summary`, `daily_steps`,
-  `steps_data`, `floors`, `heart_rates`, `rhr_day`, `hrv_data`, `sleep_data`,
-  `stress_data`, `all_day_stress`, `body_battery`, `body_battery_events`,
-  `respiration_data`, `spo2_data`, `hydration_data`,
-  `intensity_minutes_data`, `all_day_events`, `weekly_steps`,
-  `weekly_stress`, `weekly_intensity_minutes`
-- Body: `weigh_ins`, `daily_weigh_ins`, `body_composition`, `blood_pressure`
-- Training: `training_readiness`, `morning_training_readiness`,
-  `training_status`, `max_metrics`, `endurance_score`, `hill_score`,
-  `race_predictions`, `fitnessage_data`, `lactate_threshold`, `cycling_ftp`,
-  `running_tolerance`, `personal_record`, `progress_summary_between_dates`
-- Activities (completed sessions; the source of workout calories in
-  `get_garmin_summary`): `activities`, `activities_by_date`,
-  `activities_fordate`, `activity`, `last_activity`, `activity_splits`,
-  `activity_split_summaries`, `activity_typed_splits`,
-  `activity_exercise_sets`, `activity_hr_in_timezones`,
-  `activity_power_in_timezones`, `activity_types`
-- Workouts (planned workout templates and the schedule): `workouts`,
-  `workout_by_id`, `scheduled_workouts`
-- Nutrition: `nutrition_daily_food_log`, `nutrition_daily_meals`,
-  `nutrition_daily_settings`, `lifestyle_logging_data`
+The privacy line is drawn by the filter below, not by the lists: anything
+whose health or fitness substance survives stripping is allowed. That
+includes devices, gear, badges, golf, goals and training plans (harmless once
+stripped), and women's health and ECG (sensitive, but the owner's own health
+data).
 
-**Not allowed:** `activity_details` (GPS track), `activity_weather`
-(location-derived), profile and settings (`user_profile`,
-`userprofile_settings`, `full_name`, `unit_system`), devices, gear, badges and
-challenges, golf, training plans, `goals`,
-`menstrual_*` and `pregnancy_summary`.
+**Denied** are only the endpoints whose substance stripping can't remove:
+
+- Location: GPS tracks and per-second samples (`activity_details`,
+  `activity_subsecond_details`, `activity_swim_details`,
+  `activity_map_details`, `activity_polyline`), `activity_weather`,
+  `activity_segments`, `activity_images`, courses, and `golf_shot_data`.
+- Travel: `jetlag_*` and `heat_altitude_acclimation*`.
+- Race events, named after where and when they happen: `calendar_event(s)`,
+  `calendar_week`, `upcoming_events`, `primary_event`.
+- Identity: `full_name`, `user_profile(_base)`, `userprofile_settings`,
+  `personal_information`.
+- Other people's data: friends' (`adhoc`) challenges.
+- `device_messages`, the watch's message queue: a pushed workout's title
+  arrives there as `messageName`, and nothing in it is health data.
+- Getters that need an ID results never carry: the per-device ones
+  (`device_settings`, `device_solar_*`, ...) and `gear`/`gear_defaults`
+  (`gear_list` covers gear).
 
 **Stripping private fields:** activity summaries and splits carry start/end
 coordinates (`startLatitude`, `endLongitude`, …), and `get_activity` has a
 place name (`locationName`); these reveal where the owner lives. Allowed
-activity endpoints also carry the owner's identity (`ownerFullName`,
-`ownerDisplayName`, `ownerProfileImageUrl*`, `userInfoDto`), which blocking
-`full_name` and `user_profile` is meant to keep out. In HTTP mode every result
-passes through a filter that drops, recursively, keys containing the words
-`latitude`, `longitude`, `polyline`, `geo`, `location`, `owner`, `fullname`,
-`displayname`, `email`, `description`, `chronological`, `birth`, `birthdate`
-or `birthday` (actual age and birth date; Garmin's fitness age is kept), or
-the word pairs "full name", "display name", "profile image", "user info",
-"activity name", "course name" or "workout name" (these titles can contain
-places). Keys are split into words (camelCase or snake_case) and compared whole, so `averageOxygen…` and `timeAllocation` are
-kept. Elevation and time zone are left in: they're coarse.
+endpoints also carry the owner's identity (`ownerFullName`,
+`ownerDisplayName`, `ownerProfileImageUrl*`, `userInfoDto`, `userId`,
+`userProfilePk`) and their devices' (`deviceId`, `unitId`, `serialNumber`,
+`deviceName`). Every result passes through a filter that drops, recursively,
+keys containing the words `latitude`, `longitude`, `lat`, `lon`, `lng`, `gps`,
+`polyline`, `geo`, `location`, `altitude`, `owner`, `fullname`,
+`displayname`, `email`, `description`, `notes` (free text on gear, blood
+pressure readings and cycle logs), `chronological`, `birth`, `birthdate`,
+`birthday` (actual age and birth date; Garmin's fitness age is kept) or
+`serial`, or the word pairs "full name", "display name", "user name",
+"profile image", "user info", "activity name", "course name", "workout name"
+(these titles can contain places), "user id", "user profile", "profile id",
+"profile pk", "device id", "unit id", "device name", "image url", "settings
+file" "custom make" (`customMakeModel`, a gear nickname) or "message name" (a
+workout's title queued on a device, which `active_devices` lists). In the gear
+endpoints (`gear_list`, `gear_details`, `activity_gear_v2`), `name` is the
+owner's nickname for the gear, so `call_garmin_endpoint` drops it there
+(`ENDPOINT_PRIVATE_KEYS`); elsewhere `name` is data, e.g. lifestyle log
+entries. Keys are split into words (camelCase or snake_case) and compared whole,
+so `averageOxygen…`, `timeAllocation` and `latestSpo2` are kept. Elevation
+(how hilly, not where), a device's model and time zone are left in: they're
+coarse.
 
-The allowlist lives in `endpoints.py` as one explicit set, so new
-`garminconnect` getters are blocked remotely until added on purpose.
+Device IDs also appear as dict keys (`training_status` is keyed by device).
+The filter renames keys equal to a device ID found in the same result to
+`device`, `device 2`, …, so the data stays and the ID goes. Only IDs of six
+digits or more count (Garmin's have ten), so zone or rank keys like `"2"` are
+never renamed.
 
 `get_garmin_summary` reads HRV, sleep and training readiness for a date
 range through garminconnect's range getters (`get_hrv_data_range`,
 `get_sleep_daily`, `get_training_readiness_range`), which are on the
-allowlist. Remotely, raw requests (`connectapi`) are refused for every path.
+allowlist. Raw requests (`connectapi`) are refused for every path.
 `get_garmin_day`'s `metrics`
 schema lists only the allowlisted single-day endpoints, so other names are
 refused before any code runs.
 
 **Tests**, positive and negative:
 
-- Every endpoint on the "not allowed" list is rejected in HTTP mode, through
+- Every endpoint on the "not allowed" list is rejected over stdio and HTTP, through
   each entry point: `call_garmin_endpoint`, the `metrics` of
   `get_garmin_day`, and its absence from `list_garmin_endpoints`. The rejection
   happens before any Garmin request is made (the faked `Garmin` records no
@@ -277,8 +298,11 @@ refused before any code runs.
 - A getter that's on neither list (e.g. a made-up `get_new_thing` added to the
   faked `Garmin`) is rejected too, proving the default is deny.
 - Every allowlisted name exists on the installed `garminconnect.Garmin`, so a
-  library rename can't silently drop an endpoint.
-- The same disallowed endpoints still work over stdio.
+  library rename can't silently drop an endpoint, and every getter is on
+  exactly one of the two lists.
+- A `training_status` fixture shaped like a real response comes out with no
+  profile or device IDs, device names, image URLs or altitude, its
+  device-keyed maps renamed.
 - Stripping removes nested coordinate and identity keys (in lists and nested
   objects) and keeps look-alike health fields unchanged; no allowlisted
   endpoint name counts as private.

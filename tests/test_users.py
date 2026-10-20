@@ -365,7 +365,7 @@ def test_reset_waits_for_a_login_in_progress(server, provider, stores, monkeypat
     caller = threading.Thread(target=sleep_as, args=(server, ME))
     caller.start()
     assert started.wait(5)
-    exposure = replace(mcp_server.REMOTE, garmin_session=provider.garmin_session, login_url="x")
+    exposure = replace(mcp_server.POLICY, garmin_session=provider.garmin_session, login_url="x")
 
     def reset():  # what a call that Garmin rejected does, as ME
         mcp_server._exposure.set(exposure)
@@ -439,7 +439,7 @@ def test_revision_is_read_again_once_its_the_calls_turn(server, provider, stores
             proceed.wait(5)
         return link
 
-    exposure = replace(mcp_server.REMOTE, garmin_session=garmin_session, login_url="x")
+    exposure = replace(mcp_server.POLICY, garmin_session=garmin_session, login_url="x")
     used = []
 
     def call():  # what a tool call as ME does to get its session

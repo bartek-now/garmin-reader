@@ -2,8 +2,8 @@
 
 Every public `get_*` method on `garminconnect.Garmin` is exposed by name. Only
 getters are allowed, so nothing that downloads, writes or deletes is reachable.
-Over HTTP, only the endpoints in REMOTE_ALLOWED are reachable, and results go
-through strip_private().
+The MCP server only reaches the endpoints in ALLOWED, and its results go
+through strip_private(), whatever the transport: a model reads them either way.
 """
 
 from __future__ import annotations
@@ -58,57 +58,195 @@ MISSING_END_IS_START = frozenset({
 # readings, ...); the default day summary drops them and keeps scalars.
 SUMMARY_MAX_LIST = 20
 
-# Endpoints (without `get_`) reachable over HTTP: health and fitness data.
-# Explicit on purpose, so getters added to garminconnect later stay blocked
-# remotely until added here. See docs/http-server-design.md, section 5.
-REMOTE_ALLOWED = frozenset({
-    # Daily metrics
-    "stats", "stats_and_body", "user_summary", "daily_steps", "steps_data",
-    "floors", "heart_rates", "rhr_day", "hrv_data", "sleep_data",
-    "stress_data", "all_day_stress", "body_battery", "body_battery_events",
-    "respiration_data", "spo2_data", "hydration_data",
-    "intensity_minutes_data", "all_day_events", "weekly_steps",
-    "weekly_stress", "weekly_intensity_minutes",
+# Every getter on garminconnect.Garmin is in exactly one of ALLOWED and
+# DENIED (tests/test_exposure.py checks), so a getter added to the library
+# later is blocked until someone decides on it here. See
+# docs/http-server-design.md, section 5.
+#
+# Endpoints (without `get_`) the MCP tools may reach. strip_private() is what
+# keeps location and identity out of their results.
+ALLOWED = frozenset({
+    # Daily and weekly health
+    "acclimation_stats", "all_day_events", "all_day_stress", "body_battery",
+    "body_battery_events", "calories_daily", "daily_body_battery_stats",
+    "daily_floors_stats", "daily_heart_rate_stats", "daily_hydration_stats",
+    "daily_intensity_minutes_stats", "daily_movement",
+    "daily_respiration_stats", "daily_sleep", "daily_stats", "daily_steps",
+    "daily_stress_stats", "daily_summaries", "floors", "health_snapshot",
+    "health_snapshot_epochs", "health_snapshots", "health_snapshots_range",
+    "heart_rates", "hourly_intensity_minutes", "hrv_data", "hrv_data_range",
+    "hydration_all_data", "hydration_data", "intensity_minutes_data",
+    "monthly_steps", "monthly_wellness_stats", "naps", "respiration_data",
+    "rhr_daily", "rhr_day", "sleep_daily", "sleep_data",
+    "sleep_stats_overall", "sleep_stats_weekly", "spo2_acclimation_data",
+    "spo2_data", "stats", "stats_and_body", "stats_averages", "steps_data",
+    "stress_data", "week_average_resting_hr", "weekly_calories_stats",
+    "weekly_floors_stats", "weekly_heart_rate_stats",
+    "weekly_hydration_stats", "weekly_intensity_minutes", "weekly_steps",
+    "weekly_stress", "weekly_wellness_stats",
     # Body
-    "weigh_ins", "daily_weigh_ins", "body_composition", "blood_pressure",
+    "biometric_stats", "blood_pressure", "blood_pressure_day",
+    "body_composition", "current_biometrics", "daily_last_blood_pressure",
+    "daily_last_weight", "daily_weigh_ins", "ecg", "ecg_daily", "ecg_list",
+    "first_weight", "glucose_data", "glucose_data_range", "latest_weight",
+    "weekly_blood_pressure", "weekly_weight", "weigh_ins", "weight_goal",
+    "weight_snapshot",
+    # Women's health
+    "menstrual_calendar_data", "menstrual_cycle_summary",
+    "menstrual_data_for_date", "menstrual_last_confirmed",
+    "menstrual_reports", "pregnancy_summary",
     # Training
-    "training_readiness", "morning_training_readiness", "training_status",
-    "max_metrics", "endurance_score", "hill_score", "race_predictions",
-    "fitnessage_data", "lactate_threshold", "cycling_ftp",
-    "running_tolerance", "personal_record", "progress_summary_between_dates",
+    "critical_swim_speed", "critical_swim_speed_range", "cycling_ability",
+    "cycling_ability_range", "cycling_ftp", "daily_training_status",
+    "endurance_score", "fitness_age_daily", "fitness_age_details",
+    "fitness_age_weekly", "fitnessage_data",
+    "functional_threshold_power_range", "heart_rate_zones",
+    "heart_rate_zones_v2", "hill_score", "lactate_threshold", "max_metrics",
+    "max_metrics_latest", "max_metrics_range", "morning_training_readiness",
+    "one_rep_max", "one_rep_max_history", "power_curve",
+    "power_to_weight_range", "power_zones", "power_zones_for_sport",
+    "progress_summary_between_dates", "race_predictions", "running_economy",
+    "running_economy_range", "running_tolerance", "stamina_curve",
+    "strength_benchmarks", "training_four_week_load_balance",
+    "training_readiness", "training_readiness_range", "training_status",
+    "weekly_training_status",
     # Activities (completed sessions)
     "activities", "activities_by_date", "activities_fordate", "activity",
-    "last_activity", "activity_splits", "activity_split_summaries",
-    "activity_typed_splits", "activity_exercise_sets",
-    "activity_hr_in_timezones", "activity_power_in_timezones",
-    "activity_types",
-    # Workouts (planned templates and the schedule)
-    "workouts", "workout_by_id", "scheduled_workouts",
-    # Ranges (used by get_garmin_summary)
-    "hrv_data_range", "sleep_daily", "training_readiness_range",
+    "activity_event_types", "activity_exercise_sets",
+    "activity_hr_in_timezones", "activity_jump_details", "activity_laps",
+    "activity_power_curve", "activity_power_in_timezones",
+    "activity_rounds", "activity_split_summaries", "activity_splits",
+    "activity_step_details", "activity_typed_splits", "activity_types",
+    "adjacent_activities", "fastest_splits", "favorite_activities",
+    "last_activity", "personal_record", "personal_record_candidates",
+    "personal_record_types", "personal_records_for_activity",
+    "training_load_activities", "weekly_activity_stats",
+    # Workouts and training plans
+    "active_training_plans", "adaptive_training_plan_by_id",
+    "next_scheduled_workout", "pace_bands", "scheduled_workout_by_id",
+    "scheduled_workouts", "scheduled_workouts_by_period",
+    "training_plan_by_id", "training_plan_tasks", "training_plans",
+    "workout_by_id", "workout_count", "workout_sport_types",
+    "workout_types", "workouts",
     # Nutrition
-    "nutrition_daily_food_log", "nutrition_daily_meals",
-    "nutrition_daily_settings", "lifestyle_logging_data",
+    "calorie_summary", "lifestyle_logging_data", "nutrition_daily_food_log",
+    "nutrition_daily_meals", "nutrition_daily_settings", "nutrition_status",
+    # Devices and gear (IDs, names and serial numbers are stripped)
+    "active_devices", "activity_gear", "activity_gear_v2", "all_devices",
+    "device_alarms", "device_last_used", "devices",
+    "gear_activities", "gear_details", "gear_list", "gear_make_models",
+    "gear_stats", "gear_types", "historical_devices",
+    "primary_training_device", "sensors", "sync_timestamp",
+    "user_gear_types",
+    # Badges and challenges
+    "available_badge_challenges", "available_badges",
+    "available_virtual_challenges", "badge_attributes", "badge_challenge",
+    "badge_challenges", "badge_detail", "badges_for_activity",
+    "badges_for_day", "completed_virtual_challenges", "earned_badges",
+    "in_progress_badges", "inprogress_virtual_challenges",
+    "latest_earned_badges", "non_completed_badge_challenges",
+    # Golf
+    "golf_club_stats", "golf_scorecard", "golf_summary", "golf_user_stats",
+    # Goals, totals and settings
+    "available_metrics", "calendar_year", "effective_goals", "goals",
+    "lifetime_totals", "privacy_settings", "report_status", "steps_goal",
+    "unit_system", "usage_indicators", "user_goals", "user_statistics",
+    "user_summary", "user_timezone",
 })
 
-# Results sent over HTTP drop every key whose name contains one of these
-# words: coordinates, GPS tracks and place names reveal where the owner lives
-# and trains; names, profile photos, e-mail, actual age and birth date
+# Endpoints the tools never reach, and why. Only those whose substance
+# stripping can't remove belong here: a GPS track or a named place stripped
+# of its location is empty.
+_LOCATION = "its substance is location: a GPS track, coordinates or named places"
+_TRAVEL = "reveals travel: trips, destinations or where the owner has been"
+_EVENTS = "race events are named after where and when they happen"
+_IDENTITY = "its substance is the owner's identity: name, birth date, e-mail"
+_OTHERS = "other people's data (friends' challenges)"
+_NEEDS_DEVICE_ID = "needs a device ID, which results never carry"
+_NEEDS_PROFILE_ID = "needs the Garmin profile number, which results never carry; use gear_list"
+DENIED = {
+    "activity_details": _LOCATION,
+    "activity_subsecond_details": _LOCATION,
+    "activity_swim_details": _LOCATION,
+    "activity_map_details": _LOCATION,
+    "activity_polyline": _LOCATION,
+    "activity_weather": _LOCATION,
+    "activity_segments": _LOCATION,
+    "activity_images": "photos taken during an activity show where it was",
+    "course": _LOCATION,
+    "courses": _LOCATION,
+    "course_favorites": _LOCATION,
+    "golf_shot_data": _LOCATION,
+    "jetlag_status": _TRAVEL,
+    "jetlag_trips": _TRAVEL,
+    "heat_altitude_acclimation": _TRAVEL,
+    "heat_altitude_acclimation_range": _TRAVEL,
+    "calendar_event": _EVENTS,
+    "calendar_events": _EVENTS,
+    "calendar_week": _EVENTS,
+    "upcoming_events": _EVENTS,
+    "primary_event": _EVENTS,
+    "full_name": _IDENTITY,
+    "user_profile": _IDENTITY,
+    "user_profile_base": _IDENTITY,
+    "userprofile_settings": _IDENTITY,
+    "personal_information": _IDENTITY,
+    "adhoc_challenges": _OTHERS,
+    "active_adhoc_challenges": _OTHERS,
+    "device_app_info": _NEEDS_DEVICE_ID,
+    "device_displayed_activities": _NEEDS_DEVICE_ID,
+    "device_settings": _NEEDS_DEVICE_ID,
+    "device_solar_data": _NEEDS_DEVICE_ID,
+    "device_solar_gain": _NEEDS_DEVICE_ID,
+    "user_device": _NEEDS_DEVICE_ID,
+    # Its fields are free-form: a pushed workout's title arrives as
+    # `messageName`, and nothing in it is health data.
+    "device_messages": "the watch's message queue: titles of pushed workouts, no health data",
+    "gear": _NEEDS_PROFILE_ID,
+    "gear_defaults": _NEEDS_PROFILE_ID,
+}
+
+# Tool results drop every key whose name contains one of these words:
+# coordinates, GPS tracks, altitude and place names reveal where the owner
+# lives and trains; names, profile photos, e-mail, actual age and birth date
 # identify them (Garmin's fitness age, `fitnessAge`, is kept); activity and
 # course names (Garmin names activities after the place, e.g. "Poznan
-# Running") and free-text descriptions can contain either. Keys are split
+# Running") and free text (descriptions; notes on gear, blood pressure
+# readings and cycle logs) can contain either. Keys are split
 # into words (camelCase or snake_case) and compared whole, so e.g.
-# `averageOxygen` doesn't match `geo`.
+# `averageOxygen` doesn't match `geo`. Elevation (gain, loss) is kept: it's
+# how hilly a workout was, not where.
 PRIVATE_KEY_WORDS = frozenset({
-    "latitude", "longitude", "polyline", "geo", "location",
-    "owner", "fullname", "displayname", "email", "description",
+    "latitude", "longitude", "lat", "lon", "lng", "gps", "polyline", "geo",
+    "location", "altitude",
+    "owner", "fullname", "displayname", "email", "description", "notes",
     "chronological", "birth", "birthdate", "birthday",
+    "serial",
 })
-# ...or one of these consecutive word pairs.
+# ...or one of these consecutive word pairs. The IDs of the owner's Garmin
+# profile and devices (and devices' names, serial numbers and settings files)
+# identify them too; product images say nothing about their health. A
+# device's model (`deviceTypeSimpleName`) is kept.
 PRIVATE_KEY_PHRASES = frozenset({
-    ("full", "name"), ("display", "name"), ("profile", "image"), ("user", "info"),
-    ("activity", "name"), ("course", "name"), ("workout", "name"),
+    ("full", "name"), ("display", "name"), ("user", "name"), ("profile", "image"),
+    ("user", "info"), ("activity", "name"), ("course", "name"), ("workout", "name"),
+    ("user", "id"), ("user", "profile"), ("profile", "id"), ("profile", "pk"),
+    ("device", "id"), ("unit", "id"), ("device", "name"), ("image", "url"),
+    ("settings", "file"), ("custom", "make"),  # customMakeModel: a gear nickname
+    ("message", "name"),  # a pushed workout's title, queued on a device
 })
+# Keys private only in some endpoints' results: there, `name` is the
+# nickname the owner gave a piece of gear ("Jane's bike"), while elsewhere
+# it's data (lifestyle log entries, badges, exercises).
+ENDPOINT_PRIVATE_KEYS = {
+    "get_gear_list": frozenset({"name"}),
+    "get_gear_details": frozenset({"name"}),
+    "get_activity_gear_v2": frozenset({"name"}),
+}
+# Device IDs also turn up as dict keys (training status is keyed by device);
+# strip_private() renames those "device", "device 2", ...
+_DEVICE_KEY = "device"
+_MIN_DEVICE_ID_DIGITS = 6
 
 
 def _getters() -> dict[str, Any]:
@@ -147,12 +285,14 @@ def call_endpoint(
     allowed: Collection[str] | None = None,
 ) -> Any:
     """Call `endpoint` on `api`. Everything is checked before `api` is
-    touched, so a rejected call makes no Garmin request.
+    touched, so a rejected call makes no Garmin request. Keys private to
+    this endpoint (ENDPOINT_PRIVATE_KEYS) are dropped; strip_private() does
+    the rest.
     """
     getters = _getters()
     if not _is_allowed(endpoint, allowed):
         raise ValueError(
-            f"Endpoint {endpoint!r} is not available remotely. "
+            f"Endpoint {endpoint!r} is not available in garmin-reader. "
             "Use list_garmin_endpoints to see what is."
         )
     if endpoint not in getters:
@@ -165,7 +305,18 @@ def call_endpoint(
     except TypeError as err:
         raise ValueError(f"Bad arguments for {endpoint}: {err}") from err
     _check_span(endpoint, getters[endpoint], bound.arguments)
-    return getattr(api, endpoint)(**(args or {}))
+    result = getattr(api, endpoint)(**(args or {}))
+    return _drop_keys(result, ENDPOINT_PRIVATE_KEYS.get(endpoint, frozenset()))
+
+
+def _drop_keys(value: Any, keys: frozenset[str]) -> Any:
+    if not keys:
+        return value
+    if isinstance(value, dict):
+        return {k: _drop_keys(v, keys) for k, v in value.items() if k not in keys}
+    if isinstance(value, list):
+        return [_drop_keys(v, keys) for v in value]
+    return value
 
 
 def _check_span(endpoint: str, fn, arguments: dict) -> None:
@@ -254,11 +405,44 @@ def is_private_key(key: Any) -> bool:
 
 
 def strip_private(value: Any) -> Any:
-    """Recursively drop keys that are private (see PRIVATE_KEY_WORDS)."""
+    """Recursively drop keys that are private (see PRIVATE_KEY_WORDS), and
+    rename keys that are the IDs of devices named in `value`.
+    """
+    ids: dict[str, str] = {}
+    _collect_device_ids(value, ids)
+    return _strip(value, ids)
+
+
+def _collect_device_ids(value: Any, ids: dict[str, str]) -> None:
+    """Map each device ID in `value` to a neutral name, in order of appearance."""
     if isinstance(value, dict):
-        return {k: strip_private(v) for k, v in value.items() if not is_private_key(k)}
+        for k, v in value.items():
+            words = _key_words(str(k))
+            if (
+                ("device", "id") in zip(words, words[1:])
+                and isinstance(v, (int, str)) and not isinstance(v, bool)
+                # Garmin's are 10 digits; a small number (a zone, a rank)
+                # must never be renamed.
+                and len(str(v)) >= _MIN_DEVICE_ID_DIGITS
+                and str(v) not in ids
+            ):
+                n = len(ids) + 1
+                ids[str(v)] = _DEVICE_KEY if n == 1 else f"{_DEVICE_KEY} {n}"
+            _collect_device_ids(v, ids)
+    elif isinstance(value, list):
+        for v in value:
+            _collect_device_ids(v, ids)
+
+
+def _strip(value: Any, ids: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            ids.get(str(k), k): _strip(v, ids)
+            for k, v in value.items()
+            if not is_private_key(k)
+        }
     if isinstance(value, list):
-        return [strip_private(v) for v in value]
+        return [_strip(v, ids) for v in value]
     return value
 
 
@@ -307,7 +491,7 @@ def day_metrics(
     out: dict[str, Any] = {"date": day}
     for m in wanted:
         if not _is_allowed(m, allowed):
-            out[m] = {"error": f"Not available remotely. Available: {sorted(available)}"}
+            out[m] = {"error": f"Not available in garmin-reader. Available: {sorted(available)}"}
             continue
         if m not in available:
             out[m] = {"error": f"Unknown metric. Available: {sorted(available)}"}
