@@ -208,14 +208,15 @@ DENIED = {
 # lives and trains; names, profile photos, e-mail, actual age and birth date
 # identify them (Garmin's fitness age, `fitnessAge`, is kept); activity and
 # course names (Garmin names activities after the place, e.g. "Poznan
-# Running") and free-text descriptions can contain either. Keys are split
+# Running") and free text (descriptions; notes on gear, blood pressure
+# readings and cycle logs) can contain either. Keys are split
 # into words (camelCase or snake_case) and compared whole, so e.g.
 # `averageOxygen` doesn't match `geo`. Elevation (gain, loss) is kept: it's
 # how hilly a workout was, not where.
 PRIVATE_KEY_WORDS = frozenset({
     "latitude", "longitude", "lat", "lon", "lng", "gps", "polyline", "geo",
     "location", "altitude",
-    "owner", "fullname", "displayname", "email", "description",
+    "owner", "fullname", "displayname", "email", "description", "notes",
     "chronological", "birth", "birthdate", "birthday",
     "serial",
 })
@@ -228,8 +229,16 @@ PRIVATE_KEY_PHRASES = frozenset({
     ("user", "info"), ("activity", "name"), ("course", "name"), ("workout", "name"),
     ("user", "id"), ("user", "profile"), ("profile", "id"), ("profile", "pk"),
     ("device", "id"), ("unit", "id"), ("device", "name"), ("image", "url"),
-    ("settings", "file"),
+    ("settings", "file"), ("custom", "make"),  # customMakeModel: a gear nickname
 })
+# Keys private only in some endpoints' results: there, `name` is the
+# nickname the owner gave a piece of gear ("Jane's bike"), while elsewhere
+# it's data (lifestyle log entries, badges, exercises).
+ENDPOINT_PRIVATE_KEYS = {
+    "get_gear_list": frozenset({"name"}),
+    "get_gear_details": frozenset({"name"}),
+    "get_activity_gear_v2": frozenset({"name"}),
+}
 # Device IDs also turn up as dict keys (training status is keyed by device);
 # strip_private() renames those "device", "device 2", ...
 _DEVICE_KEY = "device"
@@ -272,7 +281,9 @@ def call_endpoint(
     allowed: Collection[str] | None = None,
 ) -> Any:
     """Call `endpoint` on `api`. Everything is checked before `api` is
-    touched, so a rejected call makes no Garmin request.
+    touched, so a rejected call makes no Garmin request. Keys private to
+    this endpoint (ENDPOINT_PRIVATE_KEYS) are dropped; strip_private() does
+    the rest.
     """
     getters = _getters()
     if not _is_allowed(endpoint, allowed):
@@ -290,7 +301,18 @@ def call_endpoint(
     except TypeError as err:
         raise ValueError(f"Bad arguments for {endpoint}: {err}") from err
     _check_span(endpoint, getters[endpoint], bound.arguments)
-    return getattr(api, endpoint)(**(args or {}))
+    result = getattr(api, endpoint)(**(args or {}))
+    return _drop_keys(result, ENDPOINT_PRIVATE_KEYS.get(endpoint, frozenset()))
+
+
+def _drop_keys(value: Any, keys: frozenset[str]) -> Any:
+    if not keys:
+        return value
+    if isinstance(value, dict):
+        return {k: _drop_keys(v, keys) for k, v in value.items() if k not in keys}
+    if isinstance(value, list):
+        return [_drop_keys(v, keys) for v in value]
+    return value
 
 
 def _check_span(endpoint: str, fn, arguments: dict) -> None:

@@ -255,13 +255,18 @@ endpoints also carry the owner's identity (`ownerFullName`,
 `deviceName`). Every result passes through a filter that drops, recursively,
 keys containing the words `latitude`, `longitude`, `lat`, `lon`, `lng`, `gps`,
 `polyline`, `geo`, `location`, `altitude`, `owner`, `fullname`,
-`displayname`, `email`, `description`, `chronological`, `birth`, `birthdate`,
+`displayname`, `email`, `description`, `notes` (free text on gear, blood
+pressure readings and cycle logs), `chronological`, `birth`, `birthdate`,
 `birthday` (actual age and birth date; Garmin's fitness age is kept) or
 `serial`, or the word pairs "full name", "display name", "user name",
 "profile image", "user info", "activity name", "course name", "workout name"
 (these titles can contain places), "user id", "user profile", "profile id",
-"profile pk", "device id", "unit id", "device name", "image url" or "settings
-file". Keys are split into words (camelCase or snake_case) and compared whole,
+"profile pk", "device id", "unit id", "device name", "image url", "settings
+file" or "custom make" (`customMakeModel`, a gear nickname). In the gear
+endpoints (`gear_list`, `gear_details`, `activity_gear_v2`), `name` is the
+owner's nickname for the gear, so `call_garmin_endpoint` drops it there
+(`ENDPOINT_PRIVATE_KEYS`); elsewhere `name` is data, e.g. lifestyle log
+entries. Keys are split into words (camelCase or snake_case) and compared whole,
 so `averageOxygen…`, `timeAllocation` and `latestSpo2` are kept. Elevation
 (how hilly, not where), a device's model and time zone are left in: they're
 coarse.

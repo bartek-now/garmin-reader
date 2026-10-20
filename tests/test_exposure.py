@@ -292,6 +292,57 @@ def test_devices_keep_the_model_but_nothing_that_identifies_them():
     assert out == [{"deviceTypeSimpleName": "Garmin fenix 8", "currentFirmwareVersion": "21.19"}]
 
 
+# Shaped like a gear-service v2 gear object; `name` and `notes` are the owner's.
+GEAR = {
+    "uuid": "c5e1a2b3-0000-4000-8000-000000000001", "gearType": "SHOES",
+    "brand": "Anta", "model": "A-Flash", "name": "Jane's race shoes",
+    "notes": "Kept at 123 Home Street", "maxUsageDistanceMeters": 800000,
+}
+
+
+class GearApi:
+    def get_gear_list(self, *args, **kwargs):
+        return [GEAR]
+
+    def get_gear_details(self, gear_uuid):
+        return GEAR
+
+    def get_activity_gear_v2(self, activity_id):
+        return [GEAR]
+
+    def get_activity_gear(self, activity_id):
+        return [{"gearPk": 1, "customMakeModel": "Jane's bike", "gearMakeName": "Trek"}]
+
+
+@pytest.mark.parametrize("endpoint, args", [
+    ("get_gear_list", {}), ("get_gear_details", {"gear_uuid": GEAR["uuid"]}),
+    ("get_activity_gear_v2", {"activity_id": 1}),
+])
+def test_gear_nicknames_and_notes_are_dropped(server, monkeypatch, endpoint, args):
+    monkeypatch.setattr(mcp_server, "_api", GearApi())
+    out = call(server, "call_garmin_endpoint", {"endpoint": endpoint, "args": args})
+    gear = out[0] if isinstance(out, list) else out
+    assert gear == {
+        "uuid": GEAR["uuid"], "gearType": "SHOES", "brand": "Anta", "model": "A-Flash",
+        "maxUsageDistanceMeters": 800000,
+    }
+
+
+def test_legacy_gear_nickname_is_dropped(server, monkeypatch):
+    monkeypatch.setattr(mcp_server, "_api", GearApi())
+    out = call(server, "call_garmin_endpoint", {"endpoint": "get_activity_gear", "args": {"activity_id": 1}})
+    assert out == [{"gearPk": 1, "gearMakeName": "Trek"}]
+
+
+def test_endpoint_private_keys_name_allowed_getters():
+    assert {e.removeprefix("get_") for e in endpoints.ENDPOINT_PRIVATE_KEYS} <= endpoints.ALLOWED
+
+
+def test_free_text_notes_are_dropped():
+    reading = {"systolic": 120, "diastolic": 80, "notes": "after the run home from work"}
+    assert endpoints.strip_private(reading) == {"systolic": 120, "diastolic": 80}
+
+
 def test_numeric_keys_that_are_no_device_id_are_kept():
     # Small numbers (zones, ranks) are never taken for device IDs.
     data = {"zones": {"1": 60, "2": 120}, "deviceId": 2}
