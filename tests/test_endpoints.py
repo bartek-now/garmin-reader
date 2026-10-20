@@ -45,6 +45,71 @@ def test_cap_size_drops_key_list_when_notice_too_big():
     assert "top_level_keys" not in out and len(json.dumps(out)) <= 200
 
 
+def test_to_json_leaves_out_null_keys_at_any_depth():
+    value = {"a": None, "b": {"c": None, "d": 1}, "e": [{"f": None, "g": 2}]}
+    assert json.loads(endpoints.to_json(value)) == {"b": {"d": 1}, "e": [{"g": 2}]}
+
+
+def test_to_json_keeps_nulls_in_lists():
+    # get_garmin_summary's rows: null holds the place of a day without data.
+    table = {"fields": ["date", "hrv"], "days": [["2026-10-05", None], ["2026-10-06", 41]]}
+    assert json.loads(endpoints.to_json(table)) == table
+
+
+# Shaped like a real get_activity_exercise_sets response for a 123-minute
+# strength session (40 working sets, 40 rests): 71k chars as Garmin sends it.
+_VELOCITY_FIELDS = [
+    agg + field
+    for agg in ("avg", "max")
+    for field in (
+        "ConcentricMeanVelocity", "EccentricMeanVelocity", "ConcentricPeakVelocity",
+        "EccentricPeakVelocity", "MeanPropulsiveVelocity", "ConcentricMeanPower",
+        "ConcentricPeakPower", "ConcentricDuration", "EccentricDuration", "ConcentricRom",
+    )
+]
+LONG_STRENGTH_SESSION = {
+    "activityId": 1,
+    "exerciseSets": [
+        {
+            "exercises": [
+                {"category": "TRICEPS_EXTENSION", "name": "BENCH_DIP", "probability": 42.96875},
+                {"category": "PUSH_UP", "name": None, "probability": 33.203125},
+                {"category": "PULL_UP", "name": None, "probability": 22.265625},
+            ] if i % 2 == 0 else [],
+            "duration": 16.386, "repetitionCount": 10 if i % 2 == 0 else None,
+            "weight": 0.0 if i % 2 == 0 else None,
+            "setType": "ACTIVE" if i % 2 == 0 else "REST",
+            "startTime": "2026-09-06T07:28:05.0", "wktStepIndex": None,
+            "messageIndex": i, "minimalViableThreshold": None,
+            **{f: None for f in _VELOCITY_FIELDS},
+        }
+        for i in range(80)
+    ],
+}
+
+
+def test_long_strength_session_fits_once_nulls_are_left_out():
+    assert len(json.dumps(LONG_STRENGTH_SESSION, separators=(",", ":"))) > endpoints.MAX_RESULT_CHARS
+    out = endpoints.cap_size(LONG_STRENGTH_SESSION)
+    assert out is LONG_STRENGTH_SESSION  # not replaced by the too-large notice
+    sent = endpoints.to_json(out)
+    assert len(sent) < endpoints.MAX_RESULT_CHARS / 2
+    sets = json.loads(sent)["exerciseSets"]
+    assert len(sets) == 80
+    assert sets[0]["exercises"][1] == {"category": "PUSH_UP", "probability": 33.203125}
+    assert sets[1] == {"exercises": [], "duration": 16.386, "setType": "REST",
+                       "startTime": "2026-09-06T07:28:05.0", "messageIndex": 1}
+
+
+def test_day_metric_without_data_stays_visible():
+    class NoDataApi:
+        def get_sleep_data(self, cdate):
+            return None
+
+    out = endpoints.day_metrics(NoDataApi(), "2026-10-05", ["sleep_data"])
+    assert json.loads(endpoints.to_json(out)) == {"date": "2026-10-05", "sleep_data": {}}
+
+
 def test_day_metrics_dedupes():
     class CountingApi:
         calls = 0

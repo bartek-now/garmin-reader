@@ -355,8 +355,24 @@ def _date_arg(endpoint: str, name: str, value) -> date:
 
 
 def to_json(value: Any) -> str:
-    """Compact JSON, the form results are measured and sent in."""
-    return json.dumps(value, default=str, separators=(",", ":"))
+    """Compact JSON, the form results are measured and sent in. Keys whose
+    value is null are left out: to a model a missing key says the same, and
+    Garmin fills responses with them (a strength session's sets carry 24
+    velocity and power fields, null without a velocity sensor: three
+    quarters of the response).
+    """
+    return json.dumps(_drop_nulls(value), default=str, separators=(",", ":"))
+
+
+def _drop_nulls(value: Any) -> Any:
+    """Drop null dict values, recursively. Nulls in lists stay: there they
+    hold a place, e.g. a day without data in get_garmin_summary's rows.
+    """
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
 
 
 def cap_size(result: Any, limit: int = MAX_RESULT_CHARS) -> Any:
@@ -498,6 +514,10 @@ def day_metrics(
             continue
         try:
             result = getattr(api, f"get_{m}")(day)
+            if result is None:
+                # No data that day. to_json() leaves nulls out, and a metric
+                # that vanished would look ignored rather than empty.
+                result = {}
             hint = f'pass metrics=["{m}"] for the full list'
             out[m] = summarize(result, hint=hint) if slim else result
         except (GarminLoginError, GarminConnectAuthenticationError, GarminConnectTooManyRequestsError):
