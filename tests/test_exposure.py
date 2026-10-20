@@ -339,6 +339,13 @@ def test_endpoint_private_keys_name_allowed_getters():
     assert {e.removeprefix("get_") for e in endpoints.ENDPOINT_PRIVATE_KEYS} <= endpoints.ALLOWED
 
 
+def test_queued_workout_titles_are_dropped():
+    # get_active_devices lists each device's pending messages too.
+    device = {"messageType": "workouts", "messageStatus": "new",
+              "messageName": "Hill repeats from 123 Home Street"}
+    assert endpoints.strip_private(device) == {"messageType": "workouts", "messageStatus": "new"}
+
+
 def test_free_text_notes_are_dropped():
     reading = {"systolic": 120, "diastolic": 80, "notes": "after the run home from work"}
     assert endpoints.strip_private(reading) == {"systolic": 120, "diastolic": 80}

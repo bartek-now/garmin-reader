@@ -233,6 +233,7 @@ PRIVATE_KEY_PHRASES = frozenset({
     ("user", "id"), ("user", "profile"), ("profile", "id"), ("profile", "pk"),
     ("device", "id"), ("unit", "id"), ("device", "name"), ("image", "url"),
     ("settings", "file"), ("custom", "make"),  # customMakeModel: a gear nickname
+    ("message", "name"),  # a pushed workout's title, queued on a device
 })
 # Keys private only in some endpoints' results: there, `name` is the
 # nickname the owner gave a piece of gear ("Jane's bike"), while elsewhere

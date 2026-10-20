@@ -264,7 +264,8 @@ pressure readings and cycle logs), `chronological`, `birth`, `birthdate`,
 "profile image", "user info", "activity name", "course name", "workout name"
 (these titles can contain places), "user id", "user profile", "profile id",
 "profile pk", "device id", "unit id", "device name", "image url", "settings
-file" or "custom make" (`customMakeModel`, a gear nickname). In the gear
+file" "custom make" (`customMakeModel`, a gear nickname) or "message name" (a
+workout's title queued on a device, which `active_devices` lists). In the gear
 endpoints (`gear_list`, `gear_details`, `activity_gear_v2`), `name` is the
 owner's nickname for the gear, so `call_garmin_endpoint` drops it there
 (`ENDPOINT_PRIVATE_KEYS`); elsewhere `name` is data, e.g. lifestyle log
