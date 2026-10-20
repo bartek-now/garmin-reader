@@ -2,8 +2,8 @@
 
 Every public `get_*` method on `garminconnect.Garmin` is exposed by name. Only
 getters are allowed, so nothing that downloads, writes or deletes is reachable.
-Over HTTP, only the endpoints in REMOTE_ALLOWED are reachable, and results go
-through strip_private().
+The MCP server only reaches the endpoints in ALLOWED, and its results go
+through strip_private(), whatever the transport: a model reads them either way.
 """
 
 from __future__ import annotations
@@ -58,10 +58,10 @@ MISSING_END_IS_START = frozenset({
 # readings, ...); the default day summary drops them and keeps scalars.
 SUMMARY_MAX_LIST = 20
 
-# Endpoints (without `get_`) reachable over HTTP: health and fitness data.
+# Endpoints (without `get_`) the MCP tools may reach: health and fitness data.
 # Explicit on purpose, so getters added to garminconnect later stay blocked
-# remotely until added here. See docs/http-server-design.md, section 5.
-REMOTE_ALLOWED = frozenset({
+# until added here. See docs/http-server-design.md, section 5.
+ALLOWED = frozenset({
     # Daily metrics
     "stats", "stats_and_body", "user_summary", "daily_steps", "steps_data",
     "floors", "heart_rates", "rhr_day", "hrv_data", "sleep_data",
@@ -91,7 +91,7 @@ REMOTE_ALLOWED = frozenset({
     "nutrition_daily_settings", "lifestyle_logging_data",
 })
 
-# Results sent over HTTP drop every key whose name contains one of these
+# Tool results drop every key whose name contains one of these
 # words: coordinates, GPS tracks and place names reveal where the owner lives
 # and trains; names, profile photos, e-mail, actual age and birth date
 # identify them (Garmin's fitness age, `fitnessAge`, is kept); activity and
@@ -152,7 +152,7 @@ def call_endpoint(
     getters = _getters()
     if not _is_allowed(endpoint, allowed):
         raise ValueError(
-            f"Endpoint {endpoint!r} is not available remotely. "
+            f"Endpoint {endpoint!r} is not available in garmin-reader. "
             "Use list_garmin_endpoints to see what is."
         )
     if endpoint not in getters:
@@ -307,7 +307,7 @@ def day_metrics(
     out: dict[str, Any] = {"date": day}
     for m in wanted:
         if not _is_allowed(m, allowed):
-            out[m] = {"error": f"Not available remotely. Available: {sorted(available)}"}
+            out[m] = {"error": f"Not available in garmin-reader. Available: {sorted(available)}"}
             continue
         if m not in available:
             out[m] = {"error": f"Unknown metric. Available: {sorted(available)}"}

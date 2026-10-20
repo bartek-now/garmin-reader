@@ -36,7 +36,7 @@ intercepts it:
 | Token persistence (`dump`, `load`) | Unchanged, now in `client/tokens.py`. | No change. |
 | API path checks in `_run_request` | Moved to a new `_resolve_url()`: the same traversal, query and fragment checks, and it now also accepts a full `https://` URL on a Garmin host. Errors now carry the HTTP response as `error.response`; their message is unchanged. | No change: remotely garmin-reader sends no raw paths at all now (below). |
 | Getter error decorator | Still wraps connection errors with `raise ... from e`, but now retries only 5xx responses or errors with a network failure in their cause chain (before: anything without a status). | garmin-reader's refresh-outage marker is still reached through the cause chain; outage and 404-isolation tests pass. |
-| Range getters | `get_hrv_data_range` and `get_sleep_daily` are unchanged. A new `get_training_readiness_range(start, end)` requests exactly the endpoint garmin-reader used by raw path. | `get_garmin_summary` now uses it, so remote calls never send a raw path: the raw-path exception (`summary.RANGE_PATHS`) is gone and `training_readiness_range` is on `REMOTE_ALLOWED`. |
+| Range getters | `get_hrv_data_range` and `get_sleep_daily` are unchanged. A new `get_training_readiness_range(start, end)` requests exactly the endpoint garmin-reader used by raw path. | `get_garmin_summary` now uses it, so remote calls never send a raw path: the raw-path exception (`summary.RANGE_PATHS`) is gone and `training_readiness_range` is on `ALLOWED`. |
 
 No getters were removed; 144 were added (256 in all). The remote allowlist
 excludes all of them except `get_training_readiness_range`. Getters on the
@@ -111,7 +111,7 @@ they should not be mistaken for a guarantee of compatibility.
 | `api.client._mfa_session` and `_mfa_flow` | [`GarminGateway.finish()`](../src/garmin_reader/login_page.py) temporarily wraps the MFA session to see whether any verification POST got an answer from Garmin, because `_complete_mfa` raises the same authentication error for a wrong code as for timeouts, 5xx and bot-check pages (and the widget flow lets transport errors escape raw). No answer raises `GarminVerificationUnavailable`. | Both flows must still send the code through `_mfa_session.post`, and restore nothing else on the session. Portal and mobile must still answer in JSON, the widget in HTML; `_mfa_flow` must still say which. Doubtful responses count as an answer (a counted wrong code), never as an outage. The real-client tests cover timeouts, 5xx (including JSON bodies), bot-check pages, 429s and wrong codes in both flows. |
 | `api.client._mfa_pending` | [`GarminGateway.mfa_pending()`](../src/garmin_reader/login_page.py) reads it after a failed code to decide whether `/login` shows the code form again or makes the user start over. | A wrong or rate-limited code must leave it `True` (0.3.17 and later keep the step open) and success must clear it; the real-client tests check both. If it disappears, `mfa_pending()` says no and the user starts over: safe, but the retry is lost. |
 | Token persistence | [`GarminGateway.save()`](../src/garmin_reader/login_page.py) calls `api.client.dump(path)`; [`auth.login()`](../src/garmin_reader/auth.py) reloads that store through `Garmin.login(path)`. | Saved tokens must reload without credentials and remain renewable. Inspect changes to the file format, save timing, and file permissions. |
-| Range getters `get_hrv_data_range(start, end)`, `get_sleep_daily(start, end)` and `get_training_readiness_range(start, end)` | [`summary._hrv()`, `_sleep()` and `_readiness()`](../src/garmin_reader/summary.py); all three are on `REMOTE_ALLOWED`. | `get_hrv_data_range` must still return `{"hrvSummaries": [...]}` from one request. `get_sleep_daily` must still split ranges into Garmin's 28-day chunks and return the merged, de-duplicated `individualStats` rows. `tests/test_garmin_library.py` checks both with the real client. `get_training_readiness_range` must still return the list of readiness entries (several per day possible) from one request. Because range getters can make many requests (one per chunk or page), `call_garmin_endpoint` refuses date ranges over 366 days before calling any getter with a `start`/`end`, `startdate`/`enddate` or `fromdate`/`todate` pair; check new getters use one of those names. A missing end counts as today unless the getter is in `endpoints.MISSING_END_IS_START` (those set end = start); the real-client tests check that list, and a new getter with an optional end needs a decision. |
+| Range getters `get_hrv_data_range(start, end)`, `get_sleep_daily(start, end)` and `get_training_readiness_range(start, end)` | [`summary._hrv()`, `_sleep()` and `_readiness()`](../src/garmin_reader/summary.py); all three are on `ALLOWED`. | `get_hrv_data_range` must still return `{"hrvSummaries": [...]}` from one request. `get_sleep_daily` must still split ranges into Garmin's 28-day chunks and return the merged, de-duplicated `individualStats` rows. `tests/test_garmin_library.py` checks both with the real client. `get_training_readiness_range` must still return the list of readiness entries (several per day possible) from one request. Because range getters can make many requests (one per chunk or page), `call_garmin_endpoint` refuses date ranges over 366 days before calling any getter with a `start`/`end`, `startdate`/`enddate` or `fromdate`/`todate` pair; check new getters use one of those names. A missing end counts as today unless the getter is in `endpoints.MISSING_END_IS_START` (those set end = start); the real-client tests check that list, and a new getter with an optional end needs a decision. |
 | Exception translation and chaining | [`auth.is_refresh_unavailable()`](../src/garmin_reader/auth.py), [`endpoints.py`](../src/garmin_reader/endpoints.py), [`summary.py`](../src/garmin_reader/summary.py), and [`mcp_server.py`](../src/garmin_reader/mcp_server.py). | Library decorators may wrap connection errors. The adapter's `GarminRefreshUnavailable` marker must remain reachable through `__cause__` or `__context__`. A refresh outage must fail the whole tool call with retry guidance; an unsupported optional endpoint's 404 must still allow other metrics to return. |
 
 `garmin_reader_refresh_error` and `garmin_reader_refresh_guarded` are attributes added by garmin-reader, not
@@ -156,7 +156,7 @@ hook, or removing the assertions that prove the fake HTTP layer was reached.
 
    ```console
    python -m pytest tests/test_garmin_library.py tests/test_auth.py tests/test_login_page.py tests/test_users.py -q
-   python -m pytest tests/test_summary.py tests/test_endpoints.py tests/test_remote_exposure.py -q
+   python -m pytest tests/test_summary.py tests/test_endpoints.py tests/test_exposure.py -q
    ```
 
    In particular, retain these distinctions:
@@ -170,9 +170,9 @@ hook, or removing the assertions that prove the fake HTTP layer was reached.
      or without credentials configured.
    - Parallel refreshes do not overlap, profile checks precede health requests,
      and an optional endpoint failure remains isolated from other metrics.
-3. Review getter names and signatures, `REMOTE_ALLOWED`, and response fields
-   used by the privacy filter and summaries. New `get_*` methods become
-   discoverable locally; remote exposure remains an explicit allowlist.
+3. Review getter names and signatures, `ALLOWED`, and response fields
+   used by the privacy filter and summaries. New `get_*` methods stay
+   blocked until added to the allowlist on purpose.
    New free-text, identity, or location fields need explicit review even if
    existing synthetic response tests still pass.
 4. Run the full suite with `python -m pytest -q`. Test the declared minimum

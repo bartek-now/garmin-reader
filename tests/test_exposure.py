@@ -1,4 +1,4 @@
-"""What the HTTP server's tools may reach (docs/http-server-design.md, section 5)."""
+"""What the tools may reach, over stdio and HTTP alike (docs/http-server-design.md, section 5)."""
 
 import asyncio
 import json
@@ -11,7 +11,7 @@ from garmin_reader import endpoints, mcp_server
 from garmin_reader.settings import HttpSettings
 
 GETTERS = {name.removeprefix("get_") for name in endpoints._getters()}
-DISALLOWED = sorted(GETTERS - endpoints.REMOTE_ALLOWED)
+DISALLOWED = sorted(GETTERS - endpoints.ALLOWED)
 
 # Named in the design doc's "Not allowed" list.
 SENSITIVE = [
@@ -75,6 +75,12 @@ def remote():
     return mcp_server.build_server(HttpSettings(public_url="https://x.example"))
 
 
+@pytest.fixture(scope="module", params=["stdio", "http"])
+def server(request, remote):
+    """Each transport's server: the policy must not depend on it."""
+    return mcp_server.mcp if request.param == "stdio" else remote
+
+
 def call(server, name, args):
     result = asyncio.run(server.call_tool(name, args))
     content = result[0] if isinstance(result, tuple) else result
@@ -86,57 +92,57 @@ def call(server, name, args):
 
 def test_allowlisted_names_exist_in_garminconnect():
     # A library rename must not silently drop an endpoint.
-    assert endpoints.REMOTE_ALLOWED <= GETTERS
+    assert endpoints.ALLOWED <= GETTERS
 
 
 @pytest.mark.parametrize("name", SENSITIVE)
 def test_sensitive_endpoints_not_allowlisted(name):
     assert name in GETTERS
-    assert name not in endpoints.REMOTE_ALLOWED
+    assert name not in endpoints.ALLOWED
 
 
 def test_default_day_metrics_allowlisted():
-    assert set(endpoints.DEFAULT_DAY_METRICS) <= endpoints.REMOTE_ALLOWED
+    assert set(endpoints.DEFAULT_DAY_METRICS) <= endpoints.ALLOWED
 
 
 # --- negative: disallowed endpoints, through every entry point ---------------
 
 
 @pytest.mark.parametrize("name", DISALLOWED)
-def test_call_endpoint_rejects_disallowed_remotely(api, remote, name):
-    with pytest.raises(ToolError, match="not available remotely"):
-        call(remote, "call_garmin_endpoint", {"endpoint": f"get_{name}", "args": {}})
+def test_call_endpoint_rejects_disallowed(api, server, name):
+    with pytest.raises(ToolError, match="not available"):
+        call(server, "call_garmin_endpoint", {"endpoint": f"get_{name}", "args": {}})
     assert api.calls == []  # rejected before any Garmin request
 
 
-def test_disallowed_rejection_needs_no_login(monkeypatch, remote):
+def test_disallowed_rejection_needs_no_login(monkeypatch, server):
     # Not even a login: rejection happens before the API is touched.
     monkeypatch.setattr(mcp_server, "_api", None)
     monkeypatch.setattr(mcp_server, "login", lambda **_: pytest.fail("logged in"))
-    with pytest.raises(ToolError, match="not available remotely"):
-        call(remote, "call_garmin_endpoint", {"endpoint": "get_user_profile"})
+    with pytest.raises(ToolError, match="not available"):
+        call(server, "call_garmin_endpoint", {"endpoint": "get_user_profile"})
 
 
-def test_list_endpoints_remotely_only_allowlisted(api, remote):
-    names = {e["endpoint"].removeprefix("get_") for e in call(remote, "list_garmin_endpoints", {})}
-    assert names == endpoints.REMOTE_ALLOWED
+def test_list_endpoints_only_allowlisted(api, server):
+    names = {e["endpoint"].removeprefix("get_") for e in call(server, "list_garmin_endpoints", {})}
+    assert names == endpoints.ALLOWED
     assert not names & set(DISALLOWED)
 
 
 @pytest.mark.parametrize("name", DISALLOWED)
-def test_day_rejects_disallowed_metric_remotely(api, remote, name):
+def test_day_rejects_disallowed_metric(api, server, name):
     # The schema's enum only lists allowed metrics, so the call is refused
     # before any code runs.
     with pytest.raises(ToolError, match="Input should be"):
-        call(remote, "get_garmin_day", {"date": "2026-10-05", "metrics": [name, "sleep_data"]})
+        call(server, "get_garmin_day", {"date": "2026-10-05", "metrics": [name, "sleep_data"]})
     assert api.calls == []
 
 
 @pytest.mark.parametrize("name", DISALLOWED)
 def test_day_metrics_guard_disallowed_metric_too(api, name):
     # Underneath the schema, day_metrics refuses them as well.
-    out = endpoints.day_metrics(api, "2026-10-05", [name, "sleep_data"], endpoints.REMOTE_ALLOWED)
-    assert "not available remotely" in out[name]["error"].lower()
+    out = endpoints.day_metrics(api, "2026-10-05", [name, "sleep_data"], endpoints.ALLOWED)
+    assert "not available" in out[name]["error"].lower()
     assert name not in out[name]["error"].split("Available:")[1]
     assert api.calls == ["get_sleep_data"]
 
@@ -144,38 +150,23 @@ def test_day_metrics_guard_disallowed_metric_too(api, name):
 def test_no_allowlisted_name_is_a_private_key():
     # get_garmin_day keys results by metric name; stripping must never hide
     # an allowed metric.
-    assert not [n for n in endpoints.REMOTE_ALLOWED if endpoints.is_private_key(n)]
+    assert not [n for n in endpoints.ALLOWED if endpoints.is_private_key(n)]
 
 
-def test_unknown_getter_blocked_remotely_by_default(api, remote, monkeypatch):
-    # A getter garminconnect might add later: reachable locally, not remotely.
+def test_unknown_getter_blocked_by_default(api, server, monkeypatch):
+    # A getter garminconnect might add later: blocked until allowlisted.
     monkeypatch.setattr(Garmin, "get_new_thing", lambda self: {}, raising=False)
-    with pytest.raises(ToolError, match="not available remotely"):
-        call(remote, "call_garmin_endpoint", {"endpoint": "get_new_thing"})
+    with pytest.raises(ToolError, match="not available"):
+        call(server, "call_garmin_endpoint", {"endpoint": "get_new_thing"})
     assert api.calls == []
-    call(mcp_server.mcp, "call_garmin_endpoint", {"endpoint": "get_new_thing"})
-    assert api.calls == ["get_new_thing"]
 
 
 # --- positive ----------------------------------------------------------------
 
 
-def test_allowed_endpoint_works_remotely(api, remote):
-    call(remote, "call_garmin_endpoint", {"endpoint": "get_activity", "args": {"activity_id": "1"}})
+def test_allowed_endpoint_works(api, server):
+    call(server, "call_garmin_endpoint", {"endpoint": "get_activity", "args": {"activity_id": "1"}})
     assert api.calls == ["get_activity"]
-
-
-@pytest.mark.parametrize("name", ["user_profile", "devices", "activity_details"])
-def test_disallowed_endpoints_still_work_over_stdio(api, name):
-    args = {"activity_id": "1"} if name == "activity_details" else {}
-    out = call(mcp_server.mcp, "call_garmin_endpoint", {"endpoint": f"get_{name}", "args": args})
-    assert api.calls == [f"get_{name}"]
-    assert out["summaryDTO"]["startLatitude"] == 52.1  # nothing stripped locally
-
-
-def test_list_endpoints_over_stdio_lists_everything(api):
-    names = {e["endpoint"].removeprefix("get_") for e in call(mcp_server.mcp, "list_garmin_endpoints", {})}
-    assert names == GETTERS
 
 
 # --- location stripping ------------------------------------------------------
@@ -200,16 +191,16 @@ def test_strip_private_leaves_other_data_alone():
     assert endpoints.strip_private([LOCATED])[0] == endpoints.strip_private(LOCATED)
 
 
-def test_remote_results_are_stripped(api, remote):
-    out = call(remote, "call_garmin_endpoint", {"endpoint": "get_activity", "args": {"activity_id": "1"}})
+def test_results_are_stripped(api, server):
+    out = call(server, "call_garmin_endpoint", {"endpoint": "get_activity", "args": {"activity_id": "1"}})
     assert out == endpoints.strip_private(LOCATED)
 
 
 @pytest.mark.parametrize("endpoint, args", [
     ("get_workout_by_id", {"workout_id": 1}), ("get_workouts", {}),
 ])
-def test_remote_workout_names_do_not_expose_places(api, remote, endpoint, args):
-    out = call(remote, "call_garmin_endpoint", {"endpoint": endpoint, "args": args})
+def test_workout_names_do_not_expose_places(api, server, endpoint, args):
+    out = call(server, "call_garmin_endpoint", {"endpoint": endpoint, "args": args})
     assert api.calls == [endpoint]
     assert out == {"activityId": 1, "summaryDTO": {"calories": 500.0},
                    "lapDTOs": [{"distance": 1000}]}
@@ -254,31 +245,31 @@ def has_value(value, wanted) -> bool:
     ("call_garmin_endpoint", {"endpoint": "get_fitnessage_data", "args": {"cdate": "2026-10-11"}}),
     ("get_garmin_day", {"date": "2026-10-11", "metrics": ["fitnessage_data"]}),
 ])
-def test_remote_results_never_carry_the_real_age(remote, monkeypatch, tool, args):
+def test_results_never_carry_the_real_age(server, monkeypatch, tool, args):
     monkeypatch.setattr(mcp_server, "_api", FitnessAgeApi())
-    out = call(remote, tool, args)
+    out = call(server, tool, args)
     data = out if tool == "call_garmin_endpoint" else out["fitnessage_data"]
     # The real age is gone, wherever it might hide; fitness age stays.
     assert not has_value(out, REAL_AGE)
     assert data["fitnessAge"] == 38.2 and data["components"]["rhr"] == {"value": 48}
 
 
-def test_remote_day_results_are_stripped(api, remote):
-    out = call(remote, "get_garmin_day", {"date": "d", "metrics": ["sleep_data"]})
+def test_day_results_are_stripped(api, server):
+    out = call(server, "get_garmin_day", {"date": "d", "metrics": ["sleep_data"]})
     assert out["sleep_data"] == endpoints.strip_private(LOCATED)
 
 
 # --- one choke point, failing closed -----------------------------------------
 
 
-def test_default_exposure_is_remote():
-    # Code running outside a tool wrapper gets the remote rules.
-    assert mcp_server._exposure.get() is mcp_server.REMOTE
+def test_default_exposure_is_the_policy():
+    # Code running outside a tool wrapper gets the policy too.
+    assert mcp_server._exposure.get() is mcp_server.POLICY
 
 
 @pytest.mark.parametrize("attr", ["get_user_profile", "get_new_thing", "download_activity", "garth"])
 def test_garmin_stand_in_blocks_outside_allowlist_by_default(api, attr):
-    with pytest.raises(ValueError, match="not available remotely"):
+    with pytest.raises(ValueError, match="not available"):
         getattr(mcp_server._Garmin(), attr)
     assert api.calls == []
 
@@ -297,13 +288,13 @@ def test_garmin_stand_in_allows_allowlisted_by_default(api):
 )
 def test_curated_tools_go_through_the_stand_in(api, remote, monkeypatch, tool, args):
     # Their Garmin calls are checked against the allowlist too.
-    monkeypatch.setattr(endpoints, "REMOTE_ALLOWED", frozenset())
-    monkeypatch.setattr(mcp_server, "REMOTE", mcp_server._Exposure(frozenset(), endpoints.strip_private))
-    blocked = mcp_server.build_server(HttpSettings(public_url="https://x.example"))
+    monkeypatch.setattr(endpoints, "ALLOWED", frozenset())
+    monkeypatch.setattr(mcp_server, "POLICY", mcp_server._Exposure(frozenset(), endpoints.strip_private))
+    blocked = mcp_server.build_server()
     out = call(blocked, tool, args)
     # Reported as that group's error; Garmin is never asked.
     group = args["metrics"][0]
-    assert "not available remotely" in out["errors"][group]
+    assert "not available" in out["errors"][group]
     assert out["days"] == [] and api.calls == []
 
 
@@ -343,7 +334,7 @@ def test_call_endpoint_reports_login_failure(failing_login, remote):
 @pytest.mark.parametrize(
     "getter", ["get_hrv_data_range", "get_sleep_daily", "get_training_readiness_range"]
 )
-def test_range_getters_reachable_remotely(api, getter):
+def test_range_getters_reachable(api, getter):
     getattr(mcp_server._Garmin(), getter)("2026-10-01", "2026-10-08")
     assert api.calls == [getter]
 
@@ -360,13 +351,13 @@ def test_range_getters_reachable_remotely(api, getter):
         "https://connectapi.garmin.com/userprofile-service/socialProfile",
     ],
 )
-def test_raw_paths_blocked_remotely(api, path):
-    with pytest.raises(ValueError, match="not available remotely"):
+def test_raw_paths_blocked(api, path):
+    with pytest.raises(ValueError, match="not available"):
         mcp_server._Garmin().connectapi(path)
     assert api.calls == []
 
 
-def test_summary_works_remotely_and_strips_nothing_it_needs(api, remote, monkeypatch):
+def test_summary_works_and_strips_nothing_it_needs(api, remote, monkeypatch):
     def get_hrv_data_range(start, end):
         api.calls.append("get_hrv_data_range")
         return {"hrvSummaries": [{"calendarDate": "2026-10-05", "lastNightAvg": 41}]}
@@ -376,11 +367,11 @@ def test_summary_works_remotely_and_strips_nothing_it_needs(api, remote, monkeyp
     assert out == {"fields": ["date", "hrv_last_night_ms"], "days": [["2026-10-05", 41]]}
 
 
-def test_remote_day_enum_lists_only_allowlisted_metrics(remote, monkeypatch):
-    import asyncio
-    monkeypatch.setattr(mcp_server, "REMOTE", mcp_server._Exposure(
+@pytest.mark.parametrize("http", [None, HttpSettings(public_url="https://x.example")])
+def test_day_enum_lists_only_allowlisted_metrics(monkeypatch, http):
+    monkeypatch.setattr(mcp_server, "POLICY", mcp_server._Exposure(
         frozenset({"sleep_data", "hrv_data"}), endpoints.strip_private))
-    server = mcp_server.build_server(HttpSettings(public_url="https://x.example"))
+    server = mcp_server.build_server(http)
     day = next(t for t in asyncio.run(server.list_tools()) if t.name == "get_garmin_day")
     assert day.inputSchema["properties"]["metrics"]["anyOf"][0]["items"]["enum"] == [
         "hrv_data", "sleep_data",
@@ -388,7 +379,7 @@ def test_remote_day_enum_lists_only_allowlisted_metrics(remote, monkeypatch):
     assert "- sleep_data:" in day.description and "- stress_data:" not in day.description
 
 
-def test_long_range_refused_remotely_before_any_request(api, remote):
+def test_long_range_refused_before_any_request(api, remote):
     with pytest.raises(ToolError, match="at most 366"):
         call(remote, "call_garmin_endpoint", {
             "endpoint": "get_sleep_daily", "args": {"start": "1900-01-01", "end": "2026-10-01"},

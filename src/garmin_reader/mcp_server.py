@@ -61,7 +61,7 @@ _TOOLS = []
 class _Exposure:
     """What a server's tools may reach and how their results are filtered."""
 
-    allowed: frozenset[str] | None  # endpoint names without `get_`; None = all
+    allowed: frozenset[str]  # endpoint names without `get_`
     scrub: Callable[[Any], Any]
     # Where users refresh an expired Garmin session (HTTP with OAuth).
     login_url: str | None = None
@@ -72,11 +72,11 @@ class _Exposure:
     garmin_session: Callable[[str], tuple[int, str] | None] | None = None
 
 
-LOCAL = _Exposure(allowed=None, scrub=lambda result: result)
-REMOTE = _Exposure(allowed=endpoints.REMOTE_ALLOWED, scrub=endpoints.strip_private)
-# Fails closed: code running outside a tool wrapper gets the remote rules.
-# stdio tools unlock LOCAL explicitly in _wrap().
-_exposure: ContextVar[_Exposure] = ContextVar("garmin_reader_exposure", default=REMOTE)
+# The one policy for every transport: over stdio the results reach a model
+# (and its provider) just as they do over HTTP, so stdio gets no more.
+POLICY = _Exposure(allowed=endpoints.ALLOWED, scrub=endpoints.strip_private)
+# Code running outside a tool wrapper gets the policy too.
+_exposure: ContextVar[_Exposure] = ContextVar("garmin_reader_exposure", default=POLICY)
 # The signed-in user (lowercase email) a tool call runs for, from its token.
 _user: ContextVar[str | None] = ContextVar("garmin_reader_user", default=None)
 
@@ -296,10 +296,8 @@ class _Garmin:
 
     def __getattr__(self, name):
         allowed = _exposure.get().allowed
-        if allowed is not None and not (
-            name.startswith("get_") and name.removeprefix("get_") in allowed
-        ):
-            raise ValueError(f"Garmin {name!r} is not available remotely.")
+        if not (name.startswith("get_") and name.removeprefix("get_") in allowed):
+            raise ValueError(f"Garmin {name!r} is not available in garmin-reader.")
         return getattr(_get_api(), name)
 
 
@@ -401,7 +399,7 @@ def list_garmin_endpoints() -> list[dict]:
     """List every read-only Garmin Connect endpoint with its parameters.
 
     Use the names with `call_garmin_endpoint`. Dates are YYYY-MM-DD strings.
-    Over a remote connection, only health and fitness endpoints are listed.
+    Only health and fitness endpoints are listed.
     """
     return endpoints.list_endpoints(_exposure.get().allowed)
 
@@ -411,11 +409,11 @@ def call_garmin_endpoint(endpoint: str, args: dict | None = None) -> object:
     """Call any read-only Garmin Connect endpoint, e.g. `get_sleep_data`.
 
     `args` maps parameter names to values, e.g. {"cdate": "2026-10-05"} (see
-    `list_garmin_endpoints`). Covers sleep, heart rate, HRV, stress, body
-    battery, SpO2, training status, activities and splits, devices, goals,
-    badges and more (over a remote connection, only health and fitness
-    endpoints, without location data). Oversized results are replaced by a
-    notice; narrow the request if that happens.
+    `list_garmin_endpoints`). Covers health and fitness data: sleep, heart
+    rate, HRV, stress, body battery, SpO2, training status, activities and
+    splits, workouts, nutrition and more, without location or identity data.
+    Oversized results are replaced by a notice; narrow the request if that
+    happens.
     """
     return endpoints.call_endpoint(_Garmin(), endpoint, args, _exposure.get().allowed)
 
@@ -465,9 +463,9 @@ def build_server(
     http: HttpSettings | None = None, oauth: GarminReaderOAuthProvider | None = None
 ) -> FastMCP:
     """A FastMCP server with every tool. With `http`, it's set up to be
-    served over Streamable HTTP on 127.0.0.1, reached through `http.public_url`,
-    and its tools only reach REMOTE_ALLOWED endpoints, with location data
-    stripped from every result. With `oauth` too, /mcp needs a bearer token
+    served over Streamable HTTP on 127.0.0.1, reached through `http.public_url`.
+    Either way, its tools only reach ALLOWED endpoints, with location and
+    identity data stripped from every result. With `oauth` too, /mcp needs a bearer token
     from its authorization server (docs/http-server-design.md, section 2).
     """
     kwargs = {}
@@ -501,14 +499,14 @@ def build_server(
     server = FastMCP("garmin-reader", **kwargs)
     if http is not None:
         server.custom_route("/healthz", methods=["GET"])(_healthz)
-    exposure = LOCAL if http is None else REMOTE
+    exposure = POLICY
     if oauth is not None:
         page = LoginPage(
             oauth, user_token_store, secure_cookie=http.public_url.startswith("https://"),
         )
         server.custom_route("/login", methods=["GET", "POST"])(page.handle)
         exposure = replace(
-            REMOTE, login_url=f"{http.public_url}/login", garmin_session=oauth.garmin_session
+            POLICY, login_url=f"{http.public_url}/login", garmin_session=oauth.garmin_session
         )
     for fn in _TOOLS:
         tool = _wrap(fn, exposure)
@@ -528,7 +526,7 @@ async def _healthz(request) -> JSONResponse:
 
 def _describe_day_metrics(tool, exposure: _Exposure) -> None:
     """Give get_garmin_day's `metrics` an enum of the endpoints this server
-    accepts (only allowlisted ones over HTTP), each described in one line.
+    accepts (only allowlisted ones), each described in one line.
     The list depends on the server, so it's filled in here rather than in the
     docstring itself.
     """

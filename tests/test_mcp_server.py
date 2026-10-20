@@ -130,7 +130,7 @@ def test_summary_through_mcp(monkeypatch):
 
 def test_day_metrics_are_an_enum_of_single_day_endpoints():
     schema = tool("get_garmin_day").inputSchema["properties"]["metrics"]
-    assert schema["anyOf"][0]["items"]["enum"] == mcp_server.endpoints.single_day_metrics()
+    assert schema["anyOf"][0]["items"]["enum"] == mcp_server.endpoints.single_day_metrics(mcp_server.endpoints.ALLOWED)
 
 
 def test_day_rejects_unknown_metric_before_running():
@@ -140,7 +140,7 @@ def test_day_rejects_unknown_metric_before_running():
 
 def test_day_description_documents_every_metric():
     description = tool("get_garmin_day").description
-    for name in mcp_server.endpoints.single_day_metrics():
+    for name in mcp_server.endpoints.single_day_metrics(mcp_server.endpoints.ALLOWED):
         assert f"- {name}: " in description
     assert "YYYY-MM-DD'" not in description  # garminconnect's boilerplate removed
     assert "{metrics}" not in description

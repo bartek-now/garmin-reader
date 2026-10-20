@@ -23,7 +23,7 @@ only their own Garmin data.
 | Several users | Each user's OAuth tokens carry their email; each tool call uses only the Garmin session stored for that user, never another's or a shared one. |
 | Later | A Google (or GitHub) sign-in step in front of the Garmin form, once the hostname is stable. Optionally, URL-mode elicitation as a nicer way to open `/login`. |
 | Garmin expiry | Tool error that tells the user exactly what to do, with a link to `/login`; no reconnecting the connector. This is the intended design, not a stopgap. |
-| Exposure | Remotely, `call_garmin_endpoint` is limited to an **allowlist** of health/fitness endpoints, with location fields stripped. stdio is unrestricted. |
+| Exposure | `call_garmin_endpoint` is limited to an **allowlist** of health/fitness endpoints, with location and identity fields stripped, over stdio and HTTP alike (stdio used to be unrestricted; see section 5). |
 
 ## 1. Transport
 
@@ -199,17 +199,23 @@ starts the server is a possible convenience later.
 
 ## 5. Remote exposure
 
-In HTTP mode, tools only reach allowlisted endpoints; stdio stays
-unrestricted. `call_garmin_endpoint` fails with "not available remotely" for
+Tools only reach allowlisted endpoints, whatever the transport.
+`call_garmin_endpoint` fails with "not available in garmin-reader" for
 anything else, `list_garmin_endpoints` only lists allowed endpoints, and a
-disallowed `metrics` entry of `get_garmin_day` gets its own "not available
-remotely" error while the other metrics are returned.
+disallowed `metrics` entry of `get_garmin_day` gets its own "not available"
+error while the other metrics are returned.
+
+stdio used to be unrestricted, on the idea that a local server keeps the data
+on the machine. It doesn't: Claude Desktop sends tool results to Anthropic
+like claude.ai does, and can forward a cloud session's calls to the local
+server. Every MCP client hands the data to a model, so there is one policy.
+Unfiltered access, if ever needed, belongs in the CLI, whose output goes to
+a terminal, not a model.
 
 The allowlist is enforced in one place: tools reach Garmin only through a
-stand-in object that checks every attribute against the current policy
-(including the curated tools, which only use allowed endpoints anyway). The
-policy fails closed: code running outside a tool wrapper gets the remote
-rules, and stdio tools unlock everything explicitly.
+stand-in object that checks every attribute against the policy (including
+the curated tools, which only use allowed endpoints anyway). Code running
+outside a tool wrapper gets the policy too.
 
 **Allowed** (health and fitness):
 
@@ -246,7 +252,7 @@ coordinates (`startLatitude`, `endLongitude`, …), and `get_activity` has a
 place name (`locationName`); these reveal where the owner lives. Allowed
 activity endpoints also carry the owner's identity (`ownerFullName`,
 `ownerDisplayName`, `ownerProfileImageUrl*`, `userInfoDto`), which blocking
-`full_name` and `user_profile` is meant to keep out. In HTTP mode every result
+`full_name` and `user_profile` is meant to keep out. Every result
 passes through a filter that drops, recursively, keys containing the words
 `latitude`, `longitude`, `polyline`, `geo`, `location`, `owner`, `fullname`,
 `displayname`, `email`, `description`, `chronological`, `birth`, `birthdate`
@@ -257,19 +263,19 @@ places). Keys are split into words (camelCase or snake_case) and compared whole,
 kept. Elevation and time zone are left in: they're coarse.
 
 The allowlist lives in `endpoints.py` as one explicit set, so new
-`garminconnect` getters are blocked remotely until added on purpose.
+`garminconnect` getters are blocked until added on purpose.
 
 `get_garmin_summary` reads HRV, sleep and training readiness for a date
 range through garminconnect's range getters (`get_hrv_data_range`,
 `get_sleep_daily`, `get_training_readiness_range`), which are on the
-allowlist. Remotely, raw requests (`connectapi`) are refused for every path.
+allowlist. Raw requests (`connectapi`) are refused for every path.
 `get_garmin_day`'s `metrics`
 schema lists only the allowlisted single-day endpoints, so other names are
 refused before any code runs.
 
 **Tests**, positive and negative:
 
-- Every endpoint on the "not allowed" list is rejected in HTTP mode, through
+- Every endpoint on the "not allowed" list is rejected over stdio and HTTP, through
   each entry point: `call_garmin_endpoint`, the `metrics` of
   `get_garmin_day`, and its absence from `list_garmin_endpoints`. The rejection
   happens before any Garmin request is made (the faked `Garmin` records no
@@ -278,7 +284,6 @@ refused before any code runs.
   faked `Garmin`) is rejected too, proving the default is deny.
 - Every allowlisted name exists on the installed `garminconnect.Garmin`, so a
   library rename can't silently drop an endpoint.
-- The same disallowed endpoints still work over stdio.
 - Stripping removes nested coordinate and identity keys (in lists and nested
   objects) and keeps look-alike health fields unchanged; no allowlisted
   endpoint name counts as private.

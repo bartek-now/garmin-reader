@@ -168,5 +168,5 @@ volumes survive.
   user's data: only allow people who trust them.
 - Keep the server reachable only through the HTTPS front end; don't publish
   port 8000 to the internet directly.
-- The remote exposure rules (allowlist, no location or identity data) apply
-  over HTTP regardless of host.
+- The exposure rules (allowlist, no location or identity data) apply on
+  every host and transport.

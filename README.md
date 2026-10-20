@@ -96,8 +96,8 @@ the private hooks and library behavior garmin-reader depends on, and the checks 
 - `get_garmin_day` (`date`, optional `metrics`): Garmin's own detail for one
   day, from any of its single-day endpoints (sleep, HRV, heart rate, stress,
   ...). Each metric is listed and described in the tool's schema.
-- `list_garmin_endpoints`: every read-only Garmin Connect endpoint and its
-  parameters.
+- `list_garmin_endpoints`: the read-only Garmin Connect endpoints the tools
+  may reach, and their parameters.
 - `call_garmin_endpoint` (`endpoint`, `args`): call any of those endpoints,
   e.g. `get_sleep_data` with `{"cdate": "2026-10-05"}`. Only `get_*` methods
   are reachable, so nothing can write or delete. Date ranges are limited to
@@ -107,6 +107,12 @@ the private hooks and library behavior garmin-reader depends on, and the checks 
 - `get_garmin_reader_info`: the running server's garmin-reader version, git commit and
   garminconnect version, and whether it's stale (code on disk changed since
   it started).
+
+Over stdio and HTTP alike, the tools only reach an allowlist of health and
+fitness endpoints (`ALLOWED` in `endpoints.py`), and location and identity
+data (coordinates, GPS tracks, place names, your name and profile photo) is
+stripped from every result. A local server gets no more than a remote one:
+either way the results go to a model and its provider.
 
 `garmin-reader fetch` output is unchanged. Login is non-interactive, so run
 `garmin-reader fetch` once in a terminal first to cache the session token.
@@ -130,10 +136,6 @@ remote clients such as claude.ai and ChatGPT reaching it through a tunnel or
 on an always-on host (the [Dockerfile](Dockerfile) and
 [docs/deployment.md](docs/deployment.md)). See
 [docs/http-server-design.md](docs/http-server-design.md).
-Over HTTP, the tools only reach an allowlist of health and fitness endpoints
-(`REMOTE_ALLOWED` in `endpoints.py`), and location and identity data
-(coordinates, GPS tracks, place names, your name and profile photo) is
-stripped from every result.
 
 Several people can use one server, each seeing only their own Garmin
 data. There is no list of permitted users: anyone with a Garmin account can
