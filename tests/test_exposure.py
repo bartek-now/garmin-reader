@@ -339,6 +339,34 @@ def test_endpoint_private_keys_name_allowed_getters():
     assert {e.removeprefix("get_") for e in endpoints.ENDPOINT_PRIVATE_KEYS} <= endpoints.ALLOWED
 
 
+def test_calendar_titles_are_dropped():
+    # get_scheduled_workouts is the calendar month; its activity items carry
+    # the activity's name, which Garmin takes from the place.
+    month = {"calendarItems": [
+        {"itemType": "activity", "title": "Poznan Running", "date": "2026-10-05",
+         "distance": 10000.0, "duration": 3000.0, "calories": 700},
+        {"itemType": "weight", "title": None, "weight": 78000.0},
+    ]}
+    assert endpoints.strip_private(month) == {"calendarItems": [
+        {"itemType": "activity", "date": "2026-10-05", "distance": 10000.0,
+         "duration": 3000.0, "calories": 700},
+        {"itemType": "weight", "weight": 78000.0},
+    ]}
+
+
+def test_user_ids_under_other_names_are_dropped():
+    # get_user_summary / get_stats: userDailySummaryId is the profile ID.
+    summary = {
+        "userDailySummaryId": PROFILE_ID, "calendarDate": "2026-10-19",
+        "totalSteps": 9000, "userFloorsAscendedGoal": 10, "userGoalCategory": "MANUAL",
+        "userBadgeId": 55, "userGoalPk": 7, "userRoles": ["ROLE_CONNECTUSER"],
+    }
+    assert endpoints.strip_private(summary) == {
+        "calendarDate": "2026-10-19", "totalSteps": 9000,
+        "userFloorsAscendedGoal": 10, "userGoalCategory": "MANUAL",
+    }
+
+
 def test_queued_workout_titles_are_dropped():
     # get_active_devices lists each device's pending messages too.
     device = {"messageType": "workouts", "messageStatus": "new",

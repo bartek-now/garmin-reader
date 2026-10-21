@@ -220,6 +220,8 @@ PRIVATE_KEY_WORDS = frozenset({
     "latitude", "longitude", "lat", "lon", "lng", "gps", "polyline", "geo",
     "location", "altitude",
     "owner", "fullname", "displayname", "email", "description", "notes",
+    # Calendar items' `title` is the activity's name ("Poznan Running").
+    "title",
     "chronological", "birth", "birthdate", "birthday",
     "serial",
 })
@@ -234,7 +236,12 @@ PRIVATE_KEY_PHRASES = frozenset({
     ("device", "id"), ("unit", "id"), ("device", "name"), ("image", "url"),
     ("settings", "file"), ("custom", "make"),  # customMakeModel: a gear nickname
     ("message", "name"),  # a pushed workout's title, queued on a device
+    ("user", "roles"),  # the account's permission scopes
 })
+# ...or one naming a user's ID: user...Id / user...Pk. Garmin keys IDs that
+# way, and some are the profile ID under another name (`userDailySummaryId`);
+# the rest (`userBadgeId`, `userGoalPk`) are only record numbers.
+_USER_ID_ENDINGS = frozenset({"id", "pk"})
 # Keys private only in some endpoints' results: there, `name` is the
 # nickname the owner gave a piece of gear ("Jane's bike"), while elsewhere
 # it's data (lifestyle log entries, badges, exercises).
@@ -415,8 +422,10 @@ def _key_words(key: str) -> list[str]:
 
 def is_private_key(key: Any) -> bool:
     words = _key_words(str(key))
-    return bool(PRIVATE_KEY_WORDS.intersection(words)) or any(
-        pair in PRIVATE_KEY_PHRASES for pair in zip(words, words[1:])
+    return (
+        bool(PRIVATE_KEY_WORDS.intersection(words))
+        or any(pair in PRIVATE_KEY_PHRASES for pair in zip(words, words[1:]))
+        or (len(words) > 1 and words[0] == "user" and words[-1] in _USER_ID_ENDINGS)
     )
 
 

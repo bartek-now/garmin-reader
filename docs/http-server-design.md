@@ -258,14 +258,18 @@ endpoints also carry the owner's identity (`ownerFullName`,
 keys containing the words `latitude`, `longitude`, `lat`, `lon`, `lng`, `gps`,
 `polyline`, `geo`, `location`, `altitude`, `owner`, `fullname`,
 `displayname`, `email`, `description`, `notes` (free text on gear, blood
-pressure readings and cycle logs), `chronological`, `birth`, `birthdate`,
+pressure readings and cycle logs), `title` (calendar items carry the
+activity's name, e.g. "Poznan Running"), `chronological`, `birth`, `birthdate`,
 `birthday` (actual age and birth date; Garmin's fitness age is kept) or
 `serial`, or the word pairs "full name", "display name", "user name",
 "profile image", "user info", "activity name", "course name", "workout name"
 (these titles can contain places), "user id", "user profile", "profile id",
 "profile pk", "device id", "unit id", "device name", "image url", "settings
 file" "custom make" (`customMakeModel`, a gear nickname) or "message name" (a
-workout's title queued on a device, which `active_devices` lists). In the gear
+workout's title queued on a device, which `active_devices` lists) or "user
+roles" (the account's permission scopes). Keys starting with `user` and
+ending in `Id` or `Pk` go too: `userDailySummaryId`, in `user_summary` and
+`stats`, is the profile ID under another name. In the gear
 endpoints (`gear_list`, `gear_details`, `activity_gear_v2`), `name` is the
 owner's nickname for the gear, so `call_garmin_endpoint` drops it there
 (`ENDPOINT_PRIVATE_KEYS`); elsewhere `name` is data, e.g. lifestyle log
