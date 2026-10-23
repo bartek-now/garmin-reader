@@ -7,11 +7,38 @@ logout. Garmin's own token lock serializes refreshes and token-file writes;
 the adapter reuses it to protect its temporary HTTP hook and recorded error.
 
 The implementation and library tests were checked against **garminconnect
-0.3.19**. [pyproject.toml](../pyproject.toml) currently permits `>=0.3.19,<0.4`
+0.3.20**. [pyproject.toml](../pyproject.toml) currently permits `>=0.3.20,<0.4`
 and requires Python 3.12+. The upper bound limits upgrades; it does not
 guarantee that private internals remain compatible within the 0.3 series.
 Review these dependencies when changing the installed version, including
 when rebuilding a container that resolves a newer permitted release.
+
+## 0.3.20 audit (2026-10-23)
+
+[garminconnect 0.3.20](https://pypi.org/project/garminconnect/0.3.20/) was
+compared with 0.3.19 source-to-source (`api/base.py`, `client/_base.py`,
+`client/constants.py`, `client/session.py`, `client/sso.py`) and tested in a
+separate environment, then the project's. Its Python requirement and
+dependencies are unchanged. Only login changed; this is now the minimum
+supported release.
+
+| Change | Finding | Decision |
+|---|---|---|
+| Mobile login fixed | It loads the sign-in page first and waits 2-5 s before posting the credentials; since April every mobile attempt got 429 and fell back to the slower widget or portal flows. | No change. `/login` runs the login in a worker thread, so the pause only lengthens that request. |
+| 427 treated as a rate limit | Every login strategy and the MFA code check now raise `GarminConnectTooManyRequestsError` for 427 as for 429, instead of a generic failure. | `/login` now shows "Garmin is limiting sign-ins" for it, and it counts toward the per-email limit. garmin-reader's own "no answer" check (`login_page._no_answer_status`) lists 427 too. |
+| `login(return_on_mfa=True)` returns `client_state`; `resume_login(client_state, code)` restores it on another instance | The instance that started the login ignores `client_state` and keeps using its own `_mfa_session`, `_mfa_flow` and `_mfa_pending`, all unchanged. | No change: `GarminGateway` keeps the pending login in memory and calls `resume_login(None, code)` on the same instance, so the `_mfa_session` watcher still sees the code check. Persisting `client_state` (it holds Garmin session cookies) to survive restarts was not adopted. |
+| Widget MFA keeps the CSRF token (`_widget_csrf_token`) instead of the last response (`_widget_last_resp`) | Private state only; garmin-reader never reads either. | The widget-flow tests now set up `_widget_csrf_token`. |
+
+Refresh (`_refresh_session`, `_refresh_di_token`, `_http_post`), `_run_request`,
+`dump`/`load` and the getter decorator are unchanged.
+
+Validation:
+
+- 0.3.20 in a separate environment: full offline suite, **692 passed, 1
+  skipped**; `pip check` passed. New tests: 427 on the portal and widget
+  code checks passes through as a rate limit.
+- No live account was used; live login/MFA still needs the deployment check
+  below.
 
 ## 0.3.19 audit (2026-10-16)
 

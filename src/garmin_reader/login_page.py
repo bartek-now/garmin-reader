@@ -183,8 +183,10 @@ def _answered(response: Any, widget: bool) -> bool:
 
 
 def _no_answer_status(status: int) -> bool:
-    """Timeouts, rate limits and server errors: Garmin didn't decide anything."""
-    return status in (408, 429) or status >= 500
+    """Timeouts, rate limits and server errors: Garmin didn't decide anything.
+    427 is the non-standard status Garmin's sign-in pages also block with.
+    """
+    return status in (408, 427, 429) or status >= 500
 
 
 @dataclass
