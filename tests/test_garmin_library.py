@@ -638,6 +638,7 @@ class FakeSSO:
 
 WRONG = (200, {"responseStatus": {"type": "INVALID_MFA_CODE"}})
 LIMITED = (429, {})
+BLOCKED = (427, {})  # Garmin's non-standard "blocked"
 ACCEPTED = (200, {"responseStatus": {"type": "SUCCESSFUL"}, "serviceTicketId": "ST-1"})
 
 
@@ -727,7 +728,10 @@ def test_portal_wrong_code_is_still_a_wrong_code(garmin, answers):
     assert not isinstance(err.value, GarminVerificationUnavailable)
 
 
-@pytest.mark.parametrize("answers", [[LIMITED, LIMITED], [JSON_LIMITED, JSON_LIMITED], [LIMITED, JSON_LIMITED]])
+@pytest.mark.parametrize(
+    "answers",
+    [[LIMITED, LIMITED], [JSON_LIMITED, JSON_LIMITED], [LIMITED, JSON_LIMITED], [BLOCKED, BLOCKED], [BLOCKED, LIMITED]],
+)
 def test_portal_rate_limit_passes_through(garmin, answers):
     from garmin_reader.login_page import GarminGateway
 
@@ -740,7 +744,7 @@ def awaiting_widget_code(garmin, answers):
     """The client as a widget-flow login that needs a code leaves it."""
     sso = awaiting_code(garmin, answers)
     garmin.client._mfa_flow = "widget"
-    garmin.client._widget_last_resp = page(200, '<input name="_csrf" value="token-1"/>')
+    garmin.client._widget_csrf_token = "token-1"  # what the widget's code page carried
     return sso
 
 
@@ -764,10 +768,11 @@ def test_widget_wrong_code_is_still_a_wrong_code(garmin):
     assert not isinstance(err.value, GarminVerificationUnavailable)
 
 
-def test_widget_rate_limit_passes_through(garmin):
+@pytest.mark.parametrize("status", [429, 427])
+def test_widget_rate_limit_passes_through(garmin, status):
     from garmin_reader.login_page import GarminGateway
 
-    awaiting_widget_code(garmin, [page(429, "")])
+    awaiting_widget_code(garmin, [page(status, "")])
     with pytest.raises(GarminConnectTooManyRequestsError):
         GarminGateway().finish(garmin, "123456")
 
